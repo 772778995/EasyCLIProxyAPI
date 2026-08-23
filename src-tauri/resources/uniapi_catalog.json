@@ -1,0 +1,633 @@
+{
+  "schemaVersion": 1,
+  "source": "https://uniapi.ruijie.com.cn/api/pricing",
+  "pricingVersion": "a42d372ccf0b5dd13ecf71203521f9d2",
+  "tokenPriceMultiplier": 2,
+  "currency": "USD",
+  "tokenUnit": 1000000,
+  "models": [
+    {
+      "id": "claude-fable-5",
+      "vendor": "Anthropic",
+      "description": "Claude Fable 5 是 Anthropic 于 2026 年 6 月 9 日发布的旗舰级模型，也是 Anthropic 当前最强大的广泛发布模型，面向长流程自主 Agent 设计。它可自主编写并运行测试、执行「生成—验证—修复」闭环，支持自适应思考（Adaptive Thinking）（始终开启，不可关闭），具备 1M token 上下文窗口、最大输出 128K token。在大型代码库理解、多步推理与自主任务执行方面表现突出，专为需要跨长时间自主运行的复杂 Agent 工作流打造。",
+      "tags": [
+        "旗舰",
+        "编码",
+        "深度推理",
+        "多模态",
+        "代理",
+        "200K"
+      ],
+      "supportedEndpoints": [
+        "anthropic",
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 7,
+      "outputPer1M": 35,
+      "cacheReadPer1M": 0.7,
+      "cacheCreationPer1M": 8.75,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "vendor": "Anthropic",
+      "description": "Claude Haiku 4.5 是 Anthropic 于 2025 年 10 月发布的 Claude 4.5 系列轻量模型，定位为「具备近前沿智能的最快模型」。针对高吞吐、低延迟场景深度优化，以极低的首字延迟和1/5 每百万 Token 的极致性价比，提供接近旗舰模型的基础推理与编码能力。支持 200K token 上下文、最大输出 64K token，具备扩展思考（Extended Thinking）模式可按需开启深度推理，是大规模分类、路由分发、实时对话与成本敏感型生产部署的理想选择。",
+      "tags": [
+        "轻量",
+        "快速",
+        "低成本",
+        "编码",
+        "文本",
+        "200K"
+      ],
+      "supportedEndpoints": [
+        "anthropic",
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.7,
+      "outputPer1M": 3.5,
+      "cacheReadPer1M": 0.07,
+      "cacheCreationPer1M": 0.875,
+      "fixedPrice": null,
+      "contextWindow": 200000,
+      "inputModalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "id": "claude-opus-5",
+      "vendor": "Anthropic",
+      "description": "Claude Opus 5 是 Anthropic 于 2026 年 7 月 24 日发布的旗舰大模型，是 Claude 系列中性能最强的版本。在保持与上一代 Opus 4.8 相同定价的前提下，实现了性能的大幅跃升——Frontier-Bench 基准测试得分翻倍，在编程和知识工作等领域达到 SOTA 水平。采用更高效架构设计，约一半任务的实际推理成本可逼近 Fable 5 水平。支持自适应思考（Adaptive Thinking）（默认开启），1M token 上下文、最大输出 128K token。",
+      "tags": [
+        "旗舰",
+        "深度推理",
+        "编码",
+        "多模态",
+        "代理",
+        "200K"
+      ],
+      "supportedEndpoints": [
+        "anthropic",
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 3.5,
+      "outputPer1M": 17.5,
+      "cacheReadPer1M": 0.35,
+      "cacheCreationPer1M": 4.375,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "id": "claude-sonnet-5",
+      "vendor": "Anthropic",
+      "description": "Claude Sonnet 5 是 Anthropic 于 2026 年 6 月 30 日发布的 Sonnet 系列最强智能体模型，官方定位为「速度与智能的最佳结合」。性能逼近旗舰 Opus 4.8，而价格仅约 60%。采用自适应思考（Adaptive Thinking）（默认开启，可关闭），具备 1M token 上下文、最大输出 128K token（可扩展至 300K），主打编码、工具调用、浏览器/终端使用、规划与知识工作。是目前日常高频开发工作流的推荐默认模型。",
+      "tags": [
+        "均衡",
+        "编码",
+        "推理",
+        "多模态",
+        "工具调用",
+        "200K"
+      ],
+      "supportedEndpoints": [
+        "anthropic",
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 1.4,
+      "outputPer1M": 7,
+      "cacheReadPer1M": 0.14,
+      "cacheCreationPer1M": 1.75,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "vendor": "DeepSeek",
+      "description": "DeepSeek-V4-Flash 是深度求索（DeepSeek）于 2026 年 4 月 24 日发布的 V4 系列轻量高效版本，总参数 284B（2840 亿），激活参数仅 13B，推理 FLOPs 和 KV 缓存大小分别降至前代模型的 10% 和 7%。虽在世界知识储备上稍逊于 Pro，但在推理能力上表现接近。支持最大 1M token 上下文，兼容三种推理模式（Non-Think / Think High / Think Max），支持 OpenAI 和 Anthropic 双接口。适合高并发、低延迟与成本敏感的大规模生产部署。",
+      "tags": [
+        "快速",
+        "低成本",
+        "工具调用",
+        "编码",
+        "轻量",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.0890411,
+      "outputPer1M": 0.17808219,
+      "cacheReadPer1M": 0.0178082,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "deepseek-v4-flash-maxthink",
+      "vendor": "DeepSeek",
+      "description": "deepseek-v4-flash-maxthink 是 DeepSeek-V4-Flash 模型在调用时将推理预算（reasoning_effort）设置为 max（最大）的运行模式。该模式启用模型的最深度推理能力——模型会在回答前进行更充分的思考链（Chain of Thought）推理，显著提升在数学（AIME 2025 76.8%）、编程（LiveCodeBench 91.6%、Codeforces 3052 Rating）和复杂推理任务上的表现，逼近 V4-Pro 水平。适合需要精确答案但对成本仍有一定要求的场景，以 Flash 的价格获取接近 Pro 的推理质量。",
+      "tags": [
+        "深度推理",
+        "编码",
+        "工具调用",
+        "文本",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.1369863,
+      "outputPer1M": 0.2739726,
+      "cacheReadPer1M": 0.00273973,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "deepseek-v4-flash-wot",
+      "vendor": "DeepSeek",
+      "description": "deepseek-v4-flash-wot（Without Thinking，无思考模式）是 DeepSeek-V4-Flash 模型的 Non-Think 运行模式，关闭深度思考链，直接输出响应。主打最低延迟与最高吞吐，适合简单、高频、对响应速度极度敏感的场景。在该模式下，模型直接生成答案而不进行冗长的中间推理，输出 Token 更少、首字延迟更低。适用于意图识别、文本分类、字段提取、对话路由等轻量级生产任务。",
+      "tags": [
+        "思维链",
+        "推理",
+        "编码",
+        "工具调用",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.1369863,
+      "outputPer1M": 0.2739726,
+      "cacheReadPer1M": 0.00273973,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "doubao-seed-2-1-pro-260628",
+      "vendor": "字节跳动",
+      "description": "豆包 2.1 Pro（Doubao-Seed-2.1-Pro）是字节跳动火山引擎于 2026 年 6 月 23 日 FORCE 原动力大会上发布的新一代旗舰大模型。专为 Coding 工程交付、长链路 Agent 与多模态理解三大核心场景深度优化，支持百万 token 级别上下文窗口——可一次性承载完整的项目级代码仓库或多轮复杂 Agent 对话。在复杂编程、多步逻辑推理与自主 Agent 编排上较前代显著增强，通过火山方舟平台提供 API 服务，并与 Trae 编辑器（字节自研 AI IDE）深度集成。",
+      "tags": [
+        "旗舰",
+        "编码",
+        "代理",
+        "多模态",
+        "工具调用",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.82191781,
+      "outputPer1M": 4.10958904,
+      "cacheReadPer1M": 0.16438356,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ]
+    },
+    {
+      "id": "doubao-seed-2-1-turbo-260628",
+      "vendor": "字节跳动",
+      "description": "豆包 2.1 Turbo（Doubao-Seed-2.1-Turbo）是字节跳动于 2026 年 6 月 23 日随 2.1 Pro 同步发布的轻量高效版本。继承了 2.1 系列的底层架构与基础推理能力，在延迟与吞吐上做针对性优化——以更低价格和更快响应速度，面向高并发实时交互、日常编码辅助与轻量级 Agent 任务，是 2.1 系列中成本友好、部署灵活的主力选择。",
+      "tags": [
+        "高性价比",
+        "低延迟",
+        "多模态",
+        "编码",
+        "轻量",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.4109589,
+      "outputPer1M": 2.05479452,
+      "cacheReadPer1M": 0.08219177,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ]
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "vendor": "Google",
+      "description": "",
+      "tags": [],
+      "supportedEndpoints": [
+        "gemini",
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 1.5,
+      "outputPer1M": 9,
+      "cacheReadPer1M": 0.15,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1048576,
+      "inputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ]
+    },
+    {
+      "id": "glm-5.1",
+      "vendor": "智谱",
+      "description": "",
+      "tags": [],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.8219,
+      "outputPer1M": 3.2877,
+      "cacheReadPer1M": 0.0822,
+      "cacheCreationPer1M": 1.0274,
+      "fixedPrice": null,
+      "contextWindow": 200000,
+      "inputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "glm-5.2",
+      "vendor": "智谱",
+      "description": "GLM-5.2 是智谱 AI 于 2026 年 6 月 17 日发布并开源的新一代旗舰模型，专为长程任务（Long Horizon Task）设计。核心特色是真正可用的 1M token 无损上下文——实测可承载项目级工程上下文，在一次连续任务中完成从需求分析到多端可部署产物的完整开发链路。模型在 Code Arena 全球盲测中取得可用模型第一，在 FrontierSWE 等长程基准上表现突出；强化了移动端真机调试闭环能力（支持 ADB、logcat、截图定位）与工程规范遵循度。采用 MIT 协议全量开源，Day 0 适配国产算力平台。",
+      "tags": [
+        "旗舰",
+        "长程任务",
+        "开源",
+        "工具调用",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.657534,
+      "outputPer1M": 2.30137,
+      "cacheReadPer1M": 0.164384,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1048576,
+      "inputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "glm-5.3",
+      "vendor": "智谱",
+      "description": "",
+      "tags": [],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 1.0958904,
+      "outputPer1M": 3.83561643,
+      "cacheReadPer1M": 0.2739726,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1048576,
+      "inputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "vendor": "OpenAI",
+      "description": "GPT-5.6 Luna（拉丁语\"月亮\"）是 OpenAI 于 2026 年 7 月 9 日发布的 GPT-5.6 系列轻量模型，全系速度最快、成本最低，主打高吞吐与快速响应，极具性价比。以极低价格提供 GPT-5.6 架构的基础推理与编码能力，适合大规模批处理、实时交互与成本敏感型生产部署。",
+      "tags": [
+        "轻量",
+        "低成本",
+        "高吞吐",
+        "批量处理",
+        "高性价比",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai",
+        "openai-response"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.17,
+      "outputPer1M": 1.02,
+      "cacheReadPer1M": 0.017,
+      "cacheCreationPer1M": 0.2125,
+      "fixedPrice": null,
+      "contextWindow": 372000,
+      "inputModalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "vendor": "OpenAI",
+      "description": "GPT-5.6 Sol（拉丁语\"太阳\"）是 OpenAI 于 2026 年 7 月 9 日发布的 GPT-5.6 系列全新旗舰模型，代表当前最高智能水平。在编程、知识工作、网络安全与科学研究测试中达到最先进水平，并以更少 Token 消耗取得更优表现。新增 Max（深度推理）和 Ultra（子代理并行）两种推理模式，支持显式缓存断点与最低 30 分钟缓存生命周期。",
+      "tags": [
+        "旗舰",
+        "深度推理",
+        "并行代理",
+        "编码",
+        "多模态",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai",
+        "openai-response"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 4.25,
+      "outputPer1M": 25.5,
+      "cacheReadPer1M": 0.425,
+      "cacheCreationPer1M": 5.3125,
+      "fixedPrice": null,
+      "contextWindow": 372000,
+      "inputModalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "vendor": "OpenAI",
+      "description": "GPT-5.6 Terra（拉丁语\"大地\"）是 OpenAI 于 2026 年 7 月 9 日发布的 GPT-5.6 系列均衡型模型，定位于旗舰 Sol 与轻量 Luna 之间，以约一半成本实现与前代 GPT-5.5 相当的性能。支持文本 + 图像多模态输入，上下文窗口 1.05M token、最大输出 128K，提供可调推理强度（无推理至高强度）。",
+      "tags": [
+        "均衡",
+        "高性价比",
+        "编码",
+        "多模态",
+        "可调推理"
+      ],
+      "supportedEndpoints": [
+        "openai",
+        "openai-response"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 1.7,
+      "outputPer1M": 10.2,
+      "cacheReadPer1M": 0.17,
+      "cacheCreationPer1M": 2.125,
+      "fixedPrice": null,
+      "contextWindow": 372000,
+      "inputModalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "id": "hy3",
+      "vendor": "OpenAI",
+      "description": "Hy3 是腾讯混元团队于 2026 年 7 月正式发布的旗舰大语言模型（4 月发布 Preview 版）。该模型是混元团队底层重建后推出的首款完整产品，采用快慢思考融合 MoE（混合专家）架构，总参数量 295B，激活参数 21B，最大支持 256K 上下文长度。在复杂推理、指令遵循、上下文学习、代码生成和 Agent 智能体等能力上大幅提升，Agent 能力追平 GPT-5.5，是混元系列迄今最智能的模型。",
+      "tags": [
+        "代理",
+        "开源",
+        "快慢融合",
+        "256K",
+        "编码",
+        "MoE"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.0890411,
+      "outputPer1M": 0.35616438,
+      "cacheReadPer1M": 0.02226027,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 256000,
+      "inputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kimi-k2.6",
+      "vendor": "Moonshot",
+      "description": "Kimi K2.6 是月之暗面（Moonshot AI）于 2026 年 4 月 20 日发布并开源的全栈旗舰模型。基于万亿参数 MoE 架构，在通用 Agent 调度、长程编程与代码生成能力上实现全面跃升。核心亮点是 Agent 集群（Agent Swarm）——单次调用可并行调度最多 300 个子 Agent 协同工作，支持最长 5 天不间断自主运行与 13 小时连续编码。模型具备 256K token 上下文窗口，支持文本、图片、视频输入。",
+      "tags": [
+        "代理集群",
+        "MoE",
+        "编码",
+        "开源",
+        "多模态",
+        "256K"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.57876712,
+      "outputPer1M": 2.40410959,
+      "cacheReadPer1M": 0.09794521,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 256000,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ]
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "vendor": "Moonshot",
+      "description": "Kimi K2.7 Code 是月之暗面（Moonshot AI）于 2026 年 6 月 12 日发布并开源的最强编程模型。总参数 1 万亿的 MoE 架构，具备 256K token 上下文窗口，专为长上下文编码、复杂 Agent 工作流与真实项目级开发设计。在长程编程任务中指令遵循更可靠、任务成功率显著提升，支持文本、图片与视频输入、思考模式与 MCP 工具调用，模型权重全量开源。",
+      "tags": [
+        "编码",
+        "代理",
+        "开源",
+        "MoE",
+        "工具",
+        "256K"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.57876712,
+      "outputPer1M": 2.40410959,
+      "cacheReadPer1M": 0.11575343,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 256000,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ]
+    },
+    {
+      "id": "kimi-k3",
+      "vendor": "Moonshot",
+      "description": "Kimi K3 是月之暗面（Moonshot AI）于 2026 年 7 月 17 日发布的旗舰通用大模型，也是全球首个开源的 3 万亿参数级模型（总参数 2.8 万亿）。模型基于 Kimi Delta Attention（KDA）混合线性注意力与注意力残差（AttnRes）架构，采用 Stable LatentMoE 框架在 896 个专家中激活 16 个，扩展效率较 K2 提升约 2.5 倍。原生支持视觉理解，具备 1M token 上下文窗口，第三方评测综合智能排名第三（仅次于 Claude Fable 5 与 GPT-5.6 Sol），并在 Code Arena 前端编程榜单以 1679 分位列全球第一。",
+      "tags": [
+        "旗舰",
+        "开源",
+        "编码",
+        "代理",
+        "多模态",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 2.73972603,
+      "outputPer1M": 13.69863014,
+      "cacheReadPer1M": 0.2739726,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "id": "MiniMax/MiniMax-M3",
+      "vendor": "MiniMax",
+      "description": "MiniMax-M3 是 MiniMax 稀宇科技发布的前沿大语言模型。采用 MoE（混合专家）架构，总参数量 428B，激活参数 23B，采用自研 MSA（Mixture of Sparse Attention）稀疏注意力架构。最高支持 1M token 上下文（保证最低 512K），原生支持多模态输入（文本+图片+视频）。在编程能力上表现突出，SWE-Bench Pro 达到 59.0%，超越 GPT-5.5。模型权重已开源，是当前最强的开源 MoE 模型之一。",
+      "tags": [
+        "MoE",
+        "多模态",
+        "编码",
+        "开源",
+        "推理",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.20137,
+      "outputPer1M": 0.805479,
+      "cacheReadPer1M": 0.040274,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ]
+    },
+    {
+      "id": "origin-deepseek-v4-flash-vison",
+      "vendor": "DeepSeek",
+      "description": "",
+      "tags": [],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 75,
+      "outputPer1M": 75,
+      "cacheReadPer1M": null,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "id": "origin-deepseek-v4-pro",
+      "vendor": "DeepSeek官方（低价）",
+      "description": "origin-deepseek-v4-pro 是深度求索（DeepSeek）官方原生部署的 V4-Pro 旗舰模型。作为 DeepSeek 官方直连版本，提供最新的模型更新和最直接的官方技术支持。该模型是 DeepSeek-V4 系列的最强版本，1.6T 参数 / 49B 激活 / 1M 上下文，在复杂推理、数学、代码和长上下文理解方面达到业界顶尖水平。支持三种推理模式与 OpenAI、Anthropic 双接口。",
+      "tags": [
+        "旗舰",
+        "深度推理",
+        "编码",
+        "工具调用",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.4109589,
+      "outputPer1M": 0.82191781,
+      "cacheReadPer1M": 0.00342466,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "qwen3.8-max",
+      "vendor": "阿里巴巴",
+      "description": "Qwen3.8-Max 是阿里巴巴于 2026 年 8 月 3 日正式发布的新一代多模态旗舰大模型，总参数量 2.4 万亿，激活参数约 95B，是千问系列迄今尺寸最大、性能最强的模型。采用稀疏 MoE（混合专家）架构，支持文本 + 图像 + 视频多模态输入，上下文窗口 1M token。在第三方权威榜单 Arena 中，Qwen 系列位列全球第二（仅次于 Claude），编程能力在 Code Arena 中位居前列（第三/第四），PaperBench 评测较上代提升 28.2 分创下新高。模型已开源权重并同步开源 27B 版本，是 Qwen-Max 级别模型首次面向社会开源。",
+      "tags": [
+        "旗舰",
+        "多模态",
+        "自主编程",
+        "开源",
+        "1M",
+        "MoE"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 1.23287671,
+      "outputPer1M": 3.69863014,
+      "cacheReadPer1M": 0.15410959,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ]
+    }
+  ]
+}
