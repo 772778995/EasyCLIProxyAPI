@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-08-23",
+  "updatedAt": "2026-08-30",
   "models": {
     "claude-fable-5": {
       "inputPer1M": 7,
@@ -154,12 +154,6 @@
       "outputPer1M": 7.5,
       "cacheReadPer1M": 0.15
     },
-    "glm-5.1": {
-      "inputPer1M": 0.8219,
-      "outputPer1M": 3.2877,
-      "cacheReadPer1M": 0.0822,
-      "cacheCreationPer1M": 1.0274
-    },
     "glm-5.2": {
       "inputPer1M": 0.657534,
       "outputPer1M": 2.30137,
@@ -169,6 +163,11 @@
       "inputPer1M": 1.0958904,
       "outputPer1M": 3.83561643,
       "cacheReadPer1M": 0.2739726
+    },
+    "glm-5.3-flash": {
+      "inputPer1M": 0.109589041,
+      "outputPer1M": 0.383561643,
+      "cacheReadPer1M": 0.031506849
     },
     "gpt-4.1": {
       "inputPer1M": 2,
@@ -379,7 +378,7 @@
       "outputPer1M": 4.4,
       "cacheReadPer1M": 0.275
     },
-    "origin-deepseek-v4-flash-vison": {
+    "origin-deepseek-v4-flash-vision": {
       "inputPer1M": 75,
       "outputPer1M": 75
     },
@@ -387,6 +386,26 @@
       "inputPer1M": 0.4109589,
       "outputPer1M": 0.82191781,
       "cacheReadPer1M": 0.00342466
+    },
+    "qwen3.6-27b": {
+      "inputPer1M": 0.410958904,
+      "outputPer1M": 2.465753425
+    },
+    "qwen3.6-35b-a3b": {
+      "inputPer1M": 0.246575342,
+      "outputPer1M": 1.479452055
+    },
+    "qwen3.8-27b": {
+      "inputPer1M": 0.4109589,
+      "outputPer1M": 1.64383561,
+      "cacheReadPer1M": 0.082191781,
+      "cacheCreationPer1M": 0.51369863
+    },
+    "qwen3.8-flash": {
+      "inputPer1M": 0.109589041,
+      "outputPer1M": 0.36986301,
+      "cacheReadPer1M": 0.01369863,
+      "cacheCreationPer1M": 0.171232876
     },
     "qwen3.8-max": {
       "inputPer1M": 1.23287671,

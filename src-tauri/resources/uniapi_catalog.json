@@ -121,7 +121,7 @@
     {
       "id": "deepseek-v4-flash",
       "vendor": "DeepSeek",
-      "description": "DeepSeek-V4-Flash 是深度求索（DeepSeek）于 2026 年 4 月 24 日发布的 V4 系列轻量高效版本，总参数 284B（2840 亿），激活参数仅 13B，推理 FLOPs 和 KV 缓存大小分别降至前代模型的 10% 和 7%。虽在世界知识储备上稍逊于 Pro，但在推理能力上表现接近。支持最大 1M token 上下文，兼容三种推理模式（Non-Think / Think High / Think Max），支持 OpenAI 和 Anthropic 双接口。适合高并发、低延迟与成本敏感的大规模生产部署。",
+      "description": "tx转发的原厂DS 价格、性能直接同步原厂",
       "tags": [
         "快速",
         "低成本",
@@ -131,6 +131,7 @@
         "1M"
       ],
       "supportedEndpoints": [
+        "gemini",
         "openai"
       ],
       "quotaType": 0,
@@ -147,7 +148,7 @@
     {
       "id": "deepseek-v4-flash-maxthink",
       "vendor": "DeepSeek",
-      "description": "deepseek-v4-flash-maxthink 是 DeepSeek-V4-Flash 模型在调用时将推理预算（reasoning_effort）设置为 max（最大）的运行模式。该模式启用模型的最深度推理能力——模型会在回答前进行更充分的思考链（Chain of Thought）推理，显著提升在数学（AIME 2025 76.8%）、编程（LiveCodeBench 91.6%、Codeforces 3052 Rating）和复杂推理任务上的表现，逼近 V4-Pro 水平。适合需要精确答案但对成本仍有一定要求的场景，以 Flash 的价格获取接近 Pro 的推理质量。",
+      "description": "tx转发的原厂DS 加了最大思考的参数 价格、性能直接同步原厂",
       "tags": [
         "深度推理",
         "编码",
@@ -172,7 +173,7 @@
     {
       "id": "deepseek-v4-flash-wot",
       "vendor": "DeepSeek",
-      "description": "deepseek-v4-flash-wot（Without Thinking，无思考模式）是 DeepSeek-V4-Flash 模型的 Non-Think 运行模式，关闭深度思考链，直接输出响应。主打最低延迟与最高吞吐，适合简单、高频、对响应速度极度敏感的场景。在该模式下，模型直接生成答案而不进行冗长的中间推理，输出 Token 更少、首字延迟更低。适用于意图识别、文本分类、字段提取、对话路由等轻量级生产任务。",
+      "description": "tx转发的原厂DS 加了屏蔽思考的参数 价格、性能直接同步原厂",
       "tags": [
         "思维链",
         "推理",
@@ -251,48 +252,6 @@
       ]
     },
     {
-      "id": "gemini-3.5-flash",
-      "vendor": "Google",
-      "description": "",
-      "tags": [],
-      "supportedEndpoints": [
-        "gemini",
-        "openai"
-      ],
-      "quotaType": 0,
-      "inputPer1M": 1.5,
-      "outputPer1M": 9,
-      "cacheReadPer1M": 0.15,
-      "cacheCreationPer1M": null,
-      "fixedPrice": null,
-      "contextWindow": 1048576,
-      "inputModalities": [
-        "text",
-        "image",
-        "audio",
-        "video"
-      ]
-    },
-    {
-      "id": "glm-5.1",
-      "vendor": "智谱",
-      "description": "",
-      "tags": [],
-      "supportedEndpoints": [
-        "openai"
-      ],
-      "quotaType": 0,
-      "inputPer1M": 0.8219,
-      "outputPer1M": 3.2877,
-      "cacheReadPer1M": 0.0822,
-      "cacheCreationPer1M": 1.0274,
-      "fixedPrice": null,
-      "contextWindow": 200000,
-      "inputModalities": [
-        "text"
-      ]
-    },
-    {
       "id": "glm-5.2",
       "vendor": "智谱",
       "description": "GLM-5.2 是智谱 AI 于 2026 年 6 月 17 日发布并开源的新一代旗舰模型，专为长程任务（Long Horizon Task）设计。核心特色是真正可用的 1M token 无损上下文——实测可承载项目级工程上下文，在一次连续任务中完成从需求分析到多端可部署产物的完整开发链路。模型在 Code Arena 全球盲测中取得可用模型第一，在 FrontierSWE 等长程基准上表现突出；强化了移动端真机调试闭环能力（支持 ADB、logcat、截图定位）与工程规范遵循度。采用 MIT 协议全量开源，Day 0 适配国产算力平台。",
@@ -323,7 +282,12 @@
       "description": "",
       "tags": [],
       "supportedEndpoints": [
-        "openai"
+        "anthropic",
+        "gemini",
+        "openai",
+        "openai-alpha-search",
+        "openai-response",
+        "openai-response-compact"
       ],
       "quotaType": 0,
       "inputPer1M": 1.0958904,
@@ -334,6 +298,32 @@
       "contextWindow": 1048576,
       "inputModalities": [
         "text"
+      ]
+    },
+    {
+      "id": "glm-5.3-flash",
+      "vendor": "智谱",
+      "description": "",
+      "tags": [],
+      "supportedEndpoints": [
+        "anthropic",
+        "gemini",
+        "openai",
+        "openai-alpha-search",
+        "openai-response",
+        "openai-response-compact"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.109589041,
+      "outputPer1M": 0.383561643,
+      "cacheReadPer1M": 0.031506849,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1048576,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
       ]
     },
     {
@@ -557,9 +547,9 @@
       ]
     },
     {
-      "id": "origin-deepseek-v4-flash-vison",
-      "vendor": "DeepSeek",
-      "description": "",
+      "id": "origin-deepseek-v4-flash-vision",
+      "vendor": "DeepSeek官方（低价）",
+      "description": "tx转发的原厂DS视觉模型 价格、性能直接同步原厂",
       "tags": [],
       "supportedEndpoints": [
         "openai"
@@ -579,7 +569,7 @@
     {
       "id": "origin-deepseek-v4-pro",
       "vendor": "DeepSeek官方（低价）",
-      "description": "origin-deepseek-v4-pro 是深度求索（DeepSeek）官方原生部署的 V4-Pro 旗舰模型。作为 DeepSeek 官方直连版本，提供最新的模型更新和最直接的官方技术支持。该模型是 DeepSeek-V4 系列的最强版本，1.6T 参数 / 49B 激活 / 1M 上下文，在复杂推理、数学、代码和长上下文理解方面达到业界顶尖水平。支持三种推理模式与 OpenAI、Anthropic 双接口。",
+      "description": "tx转发的原厂DS 价格、性能直接同步原厂",
       "tags": [
         "旗舰",
         "深度推理",
@@ -599,6 +589,90 @@
       "contextWindow": 1000000,
       "inputModalities": [
         "text"
+      ]
+    },
+    {
+      "id": "qwen3.6-27b",
+      "vendor": "阿里巴巴",
+      "description": "",
+      "tags": [],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.410958904,
+      "outputPer1M": 2.465753425,
+      "cacheReadPer1M": null,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 262144,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ]
+    },
+    {
+      "id": "qwen3.6-35b-a3b",
+      "vendor": "阿里巴巴",
+      "description": "",
+      "tags": [],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.246575342,
+      "outputPer1M": 1.479452055,
+      "cacheReadPer1M": null,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 262144,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ]
+    },
+    {
+      "id": "qwen3.8-27b",
+      "vendor": "阿里巴巴",
+      "description": "",
+      "tags": [],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.4109589,
+      "outputPer1M": 1.64383561,
+      "cacheReadPer1M": 0.082191781,
+      "cacheCreationPer1M": 0.51369863,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ]
+    },
+    {
+      "id": "qwen3.8-flash",
+      "vendor": "阿里巴巴",
+      "description": "",
+      "tags": [],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.109589041,
+      "outputPer1M": 0.36986301,
+      "cacheReadPer1M": 0.01369863,
+      "cacheCreationPer1M": 0.171232876,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
       ]
     },
     {

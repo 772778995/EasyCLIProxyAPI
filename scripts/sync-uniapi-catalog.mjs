@@ -9,11 +9,19 @@ import { fileURLToPath } from "node:url";
 
 const SOURCE_URL = "https://uniapi.ruijie.com.cn/api/pricing";
 const TOKEN_PRICE_MULTIPLIER = 2;
-const EXPECTED_GEMINI_INPUT = 1.5;
+// 价格哨兵锚点：glm-5.3 的 UniAPI 实付输入价（ratio 0.5479452 × 2），
+// 用于校验倍率体系未变。gemini-3.5-flash 渠道下架后不再适用。
+const SENTINEL_MODEL_ID = "glm-5.3";
+const SENTINEL_EXPECTED_INPUT = 1.0958904;
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const catalogPath = join(root, "src-tauri", "resources", "uniapi_catalog.json");
 const pricesPath = join(root, "src-tauri", "resources", "model_prices.json");
 const pricesBasePath = join(root, "scripts", "model-prices.base.json");
+const claudeCatalogBasePath = join(
+	root,
+	"scripts",
+	"model-catalog.base.json",
+);
 const claudeCatalogPath = join(
 	root,
 	"src-tauri",
@@ -32,14 +40,13 @@ const ACTIVE_MODEL_IDS = new Set([
 	"deepseek-v4-flash",
 	"deepseek-v4-flash-maxthink",
 	"deepseek-v4-flash-wot",
-	"origin-deepseek-v4-flash-vison",
+	"origin-deepseek-v4-flash-vision",
 	"origin-deepseek-v4-pro",
 	"doubao-seed-2-1-pro-260628",
 	"doubao-seed-2-1-turbo-260628",
-	"gemini-3.5-flash",
-	"glm-5.1",
 	"glm-5.2",
 	"glm-5.3",
+	"glm-5.3-flash",
 	"gpt-5.6-luna",
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
@@ -48,6 +55,10 @@ const ACTIVE_MODEL_IDS = new Set([
 	"kimi-k2.7-code",
 	"kimi-k3",
 	"MiniMax/MiniMax-M3",
+	"qwen3.6-27b",
+	"qwen3.6-35b-a3b",
+	"qwen3.8-27b",
+	"qwen3.8-flash",
 	"qwen3.8-max",
 ]);
 
@@ -60,14 +71,16 @@ const CONTEXT_WINDOWS = {
 	"deepseek-v4-flash": 1_000_000,
 	"deepseek-v4-flash-maxthink": 1_000_000,
 	"deepseek-v4-flash-wot": 1_000_000,
-	"origin-deepseek-v4-flash-vison": 1_000_000,
+	"origin-deepseek-v4-flash-vision": 1_000_000,
 	"origin-deepseek-v4-pro": 1_000_000,
 	"doubao-seed-2-1-pro-260628": 1_000_000,
 	"doubao-seed-2-1-turbo-260628": 1_000_000,
+	// gemini-3.5-flash：UniAPI 渠道已下架，不在 ACTIVE_MODEL_IDS；
+	// 上游基线仍含该模型，保留联网查证的上下文值用于 claude catalog 覆盖。
 	"gemini-3.5-flash": 1_048_576,
-	"glm-5.1": 200_000,
 	"glm-5.2": 1_048_576,
 	"glm-5.3": 1_048_576,
+	"glm-5.3-flash": 1_048_576,
 	"gpt-5.6-luna": 372_000,
 	"gpt-5.6-sol": 372_000,
 	"gpt-5.6-terra": 372_000,
@@ -76,6 +89,10 @@ const CONTEXT_WINDOWS = {
 	"kimi-k2.7-code": 256_000,
 	"kimi-k3": 1_000_000,
 	"MiniMax/MiniMax-M3": 1_000_000,
+	"qwen3.6-27b": 262_144,
+	"qwen3.6-35b-a3b": 262_144,
+	"qwen3.8-27b": 1_000_000,
+	"qwen3.8-flash": 1_000_000,
 	"qwen3.8-max": 1_000_000,
 };
 
@@ -88,14 +105,13 @@ const INPUT_MODALITIES = {
 	"deepseek-v4-flash": ["text"],
 	"deepseek-v4-flash-maxthink": ["text"],
 	"deepseek-v4-flash-wot": ["text"],
-	"origin-deepseek-v4-flash-vison": ["text", "image"],
+	"origin-deepseek-v4-flash-vision": ["text", "image"],
 	"origin-deepseek-v4-pro": ["text"],
 	"doubao-seed-2-1-pro-260628": ["text", "image", "video"],
 	"doubao-seed-2-1-turbo-260628": ["text", "image", "video"],
-	"gemini-3.5-flash": ["text", "image", "audio", "video"],
-	"glm-5.1": ["text"],
 	"glm-5.2": ["text"],
 	"glm-5.3": ["text"],
+	"glm-5.3-flash": ["text", "image", "video"],
 	"gpt-5.6-luna": ["text", "image"],
 	"gpt-5.6-sol": ["text", "image"],
 	"gpt-5.6-terra": ["text", "image"],
@@ -104,6 +120,10 @@ const INPUT_MODALITIES = {
 	"kimi-k2.7-code": ["text", "image", "video"],
 	"kimi-k3": ["text", "image"],
 	"MiniMax/MiniMax-M3": ["text", "image", "video"],
+	"qwen3.6-27b": ["text", "image", "video"],
+	"qwen3.6-35b-a3b": ["text", "image", "video"],
+	"qwen3.8-27b": ["text", "image", "video"],
+	"qwen3.8-flash": ["text", "image", "video"],
 	"qwen3.8-max": ["text", "image", "video"],
 };
 
@@ -199,10 +219,10 @@ const missing = [...ACTIVE_MODEL_IDS].filter(
 if (missing.length > 0)
 	throw new Error(`UniAPI pricing no longer provides: ${missing.join(", ")}`);
 
-const gemini = models.find((model) => model.id === "gemini-3.5-flash");
-if (!gemini || gemini.inputPer1M !== EXPECTED_GEMINI_INPUT) {
+const sentinel = models.find((model) => model.id === SENTINEL_MODEL_ID);
+if (!sentinel || sentinel.inputPer1M !== SENTINEL_EXPECTED_INPUT) {
 	throw new Error(
-		"UniAPI token price multiplier no longer matches the known Gemini price",
+		"UniAPI token price multiplier no longer matches the known glm-5.3 price",
 	);
 }
 for (const model of models) {
@@ -263,15 +283,14 @@ prices.models = Object.fromEntries(
 );
 
 // 产物 3：claude_models/model-catalog.json。
-// merge 规则：基线条目保留原字段，UniAPI 模型补/覆盖 context_window 与 display_name；
-// 新条目追加到 models 数组末尾。
+// merge 规则：基线（scripts/model-catalog.base.json，上游纯净版）条目保留原字段，
+// UniAPI 模型补/覆盖 context_window 与 display_name；新条目追加到 models 数组末尾。
+// 从 base 读取保证幂等：移出 ACTIVE_MODEL_IDS 的模型下次运行时自动从产物中消失。
 let baseClaude;
 try {
-	baseClaude = JSON.parse(await readFile(claudeCatalogPath, "utf8"));
+	baseClaude = JSON.parse(await readFile(claudeCatalogBasePath, "utf8"));
 } catch (error) {
-	throw new Error(
-		`解析 claude_models/model-catalog.json 失败: ${error.message}`,
-	);
+	throw new Error(`解析 scripts/model-catalog.base.json 失败: ${error.message}`);
 }
 const displayNames = {
 	"claude-fable-5": "Claude Fable 5",
@@ -281,14 +300,13 @@ const displayNames = {
 	"deepseek-v4-flash": "DeepSeek V4 Flash",
 	"deepseek-v4-flash-maxthink": "DeepSeek V4 Flash (Max Think)",
 	"deepseek-v4-flash-wot": "DeepSeek V4 Flash (Non-Think)",
-	"origin-deepseek-v4-flash-vison": "DeepSeek V4 Flash Vision",
+	"origin-deepseek-v4-flash-vision": "DeepSeek V4 Flash Vision",
 	"origin-deepseek-v4-pro": "DeepSeek V4 Pro",
 	"doubao-seed-2-1-pro-260628": "Doubao Seed 2.1 Pro",
 	"doubao-seed-2-1-turbo-260628": "Doubao Seed 2.1 Turbo",
-	"gemini-3.5-flash": "Gemini 3.5 Flash",
-	"glm-5.1": "GLM-5.1",
 	"glm-5.2": "GLM-5.2",
 	"glm-5.3": "GLM-5.3",
+	"glm-5.3-flash": "GLM-5.3 Flash",
 	"gpt-5.6-luna": "GPT-5.6-Luna",
 	"gpt-5.6-sol": "GPT-5.6-Sol",
 	"gpt-5.6-terra": "GPT-5.6-Terra",
@@ -297,6 +315,10 @@ const displayNames = {
 	"kimi-k2.7-code": "Kimi K2.7 Code",
 	"kimi-k3": "Kimi K3",
 	"MiniMax/MiniMax-M3": "MiniMax M3",
+	"qwen3.6-27b": "Qwen3.6-27B",
+	"qwen3.6-35b-a3b": "Qwen3.6-35B-A3B",
+	"qwen3.8-27b": "Qwen3.8-27B",
+	"qwen3.8-flash": "Qwen3.8-Flash",
 	"qwen3.8-max": "Qwen3.8-Max",
 };
 const claudeCatalog = {
