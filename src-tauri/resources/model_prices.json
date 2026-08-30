@@ -2,6 +2,16 @@
   "schemaVersion": 1,
   "updatedAt": "2026-08-30",
   "models": {
+    "ali-deepseek-v4-flash": {
+      "inputPer1M": 0.10273973,
+      "outputPer1M": 0.20547945,
+      "cacheReadPer1M": 0.02054795
+    },
+    "ali-deepseek-v4-pro": {
+      "inputPer1M": 0.90410959,
+      "outputPer1M": 1.80821918,
+      "cacheReadPer1M": 0.07534247
+    },
     "claude-fable-5": {
       "inputPer1M": 7,
       "outputPer1M": 35,
@@ -99,6 +109,21 @@
       "outputPer1M": 0.2739726,
       "cacheReadPer1M": 0.00273973
     },
+    "deepseek-v4-pro": {
+      "inputPer1M": 0.90410959,
+      "outputPer1M": 1.80821918,
+      "cacheReadPer1M": 0.07534247
+    },
+    "doubao-seed-2-0-lite-260428": {
+      "inputPer1M": 0.08219178,
+      "outputPer1M": 0.493151068,
+      "cacheReadPer1M": 0.01643836
+    },
+    "doubao-seed-2-0-mini-260428": {
+      "inputPer1M": 0.02739726,
+      "outputPer1M": 0.2739726,
+      "cacheReadPer1M": 0.00547945
+    },
     "doubao-seed-2-1-pro-260628": {
       "inputPer1M": 0.82191781,
       "outputPer1M": 4.10958904,
@@ -108,6 +133,14 @@
       "inputPer1M": 0.4109589,
       "outputPer1M": 2.05479452,
       "cacheReadPer1M": 0.08219177
+    },
+    "doubao-seedance-2-0-260128": {
+      "inputPer1M": 6.986301,
+      "outputPer1M": 6.986301
+    },
+    "doubao-seedance-2-5": {
+      "inputPer1M": 9.589041,
+      "outputPer1M": 9.589041
     },
     "gemini-2.5-flash": {
       "inputPer1M": 0.3,
@@ -238,14 +271,16 @@
       "cacheReadPer1M": 0.175
     },
     "gpt-5.4": {
-      "inputPer1M": 2.5,
-      "outputPer1M": 15,
-      "cacheReadPer1M": 0.25
+      "inputPer1M": 2.125,
+      "outputPer1M": 12.75,
+      "cacheReadPer1M": 0.2125,
+      "cacheCreationPer1M": 2.65625
     },
     "gpt-5.4-mini": {
-      "inputPer1M": 0.75,
-      "outputPer1M": 4.5,
-      "cacheReadPer1M": 0.075
+      "inputPer1M": 0.6375,
+      "outputPer1M": 3.825,
+      "cacheReadPer1M": 0.06375,
+      "cacheCreationPer1M": 0.796875
     },
     "gpt-5.4-nano": {
       "inputPer1M": 0.2,
@@ -258,9 +293,10 @@
       "cacheReadPer1M": 3
     },
     "gpt-5.5": {
-      "inputPer1M": 5,
-      "outputPer1M": 30,
-      "cacheReadPer1M": 0.5
+      "inputPer1M": 4.25,
+      "outputPer1M": 25.5,
+      "cacheReadPer1M": 0.425,
+      "cacheCreationPer1M": 5.3125
     },
     "gpt-5.5-pro": {
       "inputPer1M": 30,
@@ -290,6 +326,11 @@
       "outputPer1M": 10.2,
       "cacheReadPer1M": 0.17,
       "cacheCreationPer1M": 2.125
+    },
+    "gpt-image-2": {
+      "inputPer1M": 4.25,
+      "outputPer1M": 25.5,
+      "cacheReadPer1M": 1.7
     },
     "grok-3": {
       "inputPer1M": 3,
@@ -350,6 +391,10 @@
       "outputPer1M": 0.805479,
       "cacheReadPer1M": 0.040274
     },
+    "model-router": {
+      "inputPer1M": 8,
+      "outputPer1M": 8
+    },
     "o1": {
       "inputPer1M": 15,
       "outputPer1M": 60,
@@ -378,6 +423,11 @@
       "outputPer1M": 4.4,
       "cacheReadPer1M": 0.275
     },
+    "origin-deepseek-v4-flash": {
+      "inputPer1M": 0.1369863,
+      "outputPer1M": 0.2739726,
+      "cacheReadPer1M": 0.00273973
+    },
     "origin-deepseek-v4-flash-vision": {
       "inputPer1M": 75,
       "outputPer1M": 75
@@ -387,6 +437,18 @@
       "outputPer1M": 0.82191781,
       "cacheReadPer1M": 0.00342466
     },
+    "qwen3-rerank": {
+      "inputPer1M": 0.05136986,
+      "outputPer1M": 0.05136986
+    },
+    "qwen3-vl-embedding": {
+      "inputPer1M": 0.184932,
+      "outputPer1M": 0.184932
+    },
+    "qwen3-vl-rerank": {
+      "inputPer1M": 0.184932,
+      "outputPer1M": 0.184932
+    },
     "qwen3.6-27b": {
       "inputPer1M": 0.410958904,
       "outputPer1M": 2.465753425
@@ -394,6 +456,35 @@
     "qwen3.6-35b-a3b": {
       "inputPer1M": 0.246575342,
       "outputPer1M": 1.479452055
+    },
+    "qwen3.6-35b-a3b-fp8": {
+      "inputPer1M": 0,
+      "outputPer1M": 0
+    },
+    "qwen3.6-flash-non-thinking": {
+      "inputPer1M": 0.12328767,
+      "outputPer1M": 0.73972603,
+      "cacheReadPer1M": 0.01232877
+    },
+    "qwen3.6-plus": {
+      "inputPer1M": 0.205479,
+      "outputPer1M": 1.232877,
+      "cacheReadPer1M": 0.020548
+    },
+    "qwen3.7-flash": {
+      "inputPer1M": 0.02054795,
+      "outputPer1M": 0.08219178,
+      "cacheReadPer1M": 0.00410959
+    },
+    "qwen3.7-max": {
+      "inputPer1M": 1.23287671,
+      "outputPer1M": 3.69863014,
+      "cacheReadPer1M": 0.12328767
+    },
+    "qwen3.7-plus": {
+      "inputPer1M": 0.20547945,
+      "outputPer1M": 0.82191781,
+      "cacheReadPer1M": 0.02054795
     },
     "qwen3.8-27b": {
       "inputPer1M": 0.4109589,
@@ -411,6 +502,48 @@
       "inputPer1M": 1.23287671,
       "outputPer1M": 3.69863014,
       "cacheReadPer1M": 0.15410959
+    },
+    "T-C-7-c": {
+      "inputPer1M": 3.5,
+      "outputPer1M": 17.5,
+      "cacheReadPer1M": 0.35,
+      "cacheCreationPer1M": 4.375
+    },
+    "text-embedding-3-large": {
+      "inputPer1M": 0.1105,
+      "outputPer1M": 0.1105
+    },
+    "text-embedding-3-small": {
+      "inputPer1M": 0.017,
+      "outputPer1M": 0.017
+    },
+    "text-embedding-ada-002": {
+      "inputPer1M": 0.085,
+      "outputPer1M": 0.085
+    },
+    "text-embedding-v4": {
+      "inputPer1M": 0.05136985,
+      "outputPer1M": 0.05136985
+    },
+    "tx-deepseek-v4-flash": {
+      "inputPer1M": 0.143835616,
+      "outputPer1M": 0.431506849,
+      "cacheReadPer1M": 0.004794521
+    },
+    "tx-deepseek-v4-pro": {
+      "inputPer1M": 0.90410959,
+      "outputPer1M": 1.80821918,
+      "cacheReadPer1M": 0.07534247
+    },
+    "zj-deepseek-v4-flash": {
+      "inputPer1M": 0.20547945,
+      "outputPer1M": 0.616438355,
+      "cacheReadPer1M": 0.006849315
+    },
+    "zj-deepseek-v4-pro": {
+      "inputPer1M": 0.6164383,
+      "outputPer1M": 1.849315065,
+      "cacheReadPer1M": 0.020547945
     }
   }
 }

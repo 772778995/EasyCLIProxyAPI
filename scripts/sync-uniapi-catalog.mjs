@@ -1,6 +1,9 @@
 // 从 UniAPI pricing API 拉取模型数据，生成三份产物：
 // 1. src-tauri/resources/uniapi_catalog.json —— UniAPI 精选模型目录（含 contextWindow/inputModalities，联网查证值）
-// 2. src-tauri/resources/model_prices.json —— 用量成本估算价格表（上游基线 57 条 + UniAPI 覆盖/追加，schemaVersion 1）
+// 2. src-tauri/resources/model_prices.json —— 用量成本估算价格表（上游基线 + UniAPI 覆盖/追加）。
+//    覆盖 live 全部按 token 计价（quota_type 0）的模型：渠道变体（ali-/tx-/zj-/origin-）与
+//    embedding/rerank 同样会产生用量记录，一并收录；quota_type 1 按次计价的模型无法用
+//    token 价格表达，跳过
 // 3. src-tauri/resources/claude_models/model-catalog.json —— Claude agent 上下文窗口/显示名目录（基线 + UniAPI 模型 merge）
 // 运行：bun scripts/sync-uniapi-catalog.mjs
 import { readFile, writeFile } from "node:fs/promises";
@@ -154,7 +157,7 @@ const finiteNonNegative = (value, field, model) => {
 };
 const rounded = (value) => (value === null ? null : Number(value.toFixed(9)));
 
-const models = payload.data
+const allModels = payload.data
 	.map((raw) => {
 		const model = String(raw.model_name ?? "").trim();
 		if (!model) throw new Error("UniAPI pricing contains an empty model name");
@@ -207,8 +210,10 @@ const models = payload.data
 			fixedPrice: quotaType === 1 ? modelPrice : null,
 		};
 	})
-	.filter((model) => ACTIVE_MODEL_IDS.has(model.id))
 	.sort((left, right) => left.id.localeCompare(right.id));
+
+// 精选目录模型：精选清单内的子集（上下文/模态均已联网查证）
+const models = allModels.filter((model) => ACTIVE_MODEL_IDS.has(model.id));
 
 const missing = [...ACTIVE_MODEL_IDS].filter(
 	(id) => !models.some((model) => model.id === id),
@@ -261,7 +266,9 @@ const prices = {
 	updatedAt: new Date().toISOString().slice(0, 10),
 	models: { ...basePrices.models },
 };
-for (const model of models) {
+// 覆盖 live 全部 quota_type 0 模型：用量统计按模型名精确匹配价格，
+// 不在精选目录里的模型照样会被调用并产生用量记录。
+for (const model of allModels) {
 	if (model.quotaType !== 0) continue;
 	const entry = {
 		inputPer1M: model.inputPer1M,
