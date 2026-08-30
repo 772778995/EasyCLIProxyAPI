@@ -2,12 +2,28 @@ use super::*;
 
 #[tauri::command]
 pub(crate) async fn check_latest_core(
+    app: tauri::AppHandle,
     gui_config_state: tauri::State<'_, GuiConfigState>,
 ) -> Result<CoreLatest, String> {
+    let _detection_guard = VERSION_SOURCE_DETECTION_LOCK.lock().await;
     let platform = current_core_platform()?;
-    let proxy_url = gui_config_state.snapshot()?.proxy_url;
-    let client = http_client(&proxy_url)?;
-    let release = fetch_release(&client, None).await?;
+    let config = gui_config_state.snapshot()?;
+    let proxy_url = config.proxy_url.clone();
+    let client = http_client(&proxy_url, &config.custom_download_mirrors)?;
+    let requested_source = config.selected_download_candidate();
+    let (release, resolved_source) = fetch_release(
+        &client,
+        None,
+        requested_source.clone(),
+        &config.custom_download_mirrors,
+    )
+    .await?;
+    persist_automatic_download_source_switch(
+        &app,
+        gui_config_state.inner(),
+        &requested_source,
+        &resolved_source,
+    )?;
     let asset = select_release_asset(&release, &platform)?;
 
     Ok(CoreLatest {
@@ -23,14 +39,22 @@ pub(crate) fn detect_bundled_core() -> Result<Option<BundledCoreInfo>, String> {
 
 #[tauri::command]
 pub(crate) fn install_bundled_core(
+    app: tauri::AppHandle,
     window: tauri::Window,
     state: tauri::State<'_, CoreDownloadState>,
+    process_state: tauri::State<'_, CoreProcessState>,
+    gui_config_state: tauri::State<'_, GuiConfigState>,
 ) -> Result<CoreInstallResult, String> {
     let (info, archive_path) = bundled_core_archive()?
         .ok_or_else(|| "当前发行包没有匹配此系统架构的内置内核".to_string())?;
     let token = CancellationToken::new();
     state.start(token, Some(info.version.clone()))?;
-    let result = install_bundled_core_inner(&window, state.inner(), &info, &archive_path);
+    let result = install_core_with_runtime_restore(
+        &app,
+        process_state.inner(),
+        gui_config_state.inner(),
+        || install_bundled_core_inner(&window, state.inner(), &info, &archive_path),
+    );
     if result.is_err() {
         let _ = cleanup_core_work_dirs();
     }
@@ -77,22 +101,113 @@ pub(crate) fn get_core_install_task(state: tauri::State<'_, CoreDownloadState>) 
 
 #[tauri::command]
 pub(crate) async fn install_core_version(
+    app: tauri::AppHandle,
     window: tauri::Window,
     state: tauri::State<'_, CoreDownloadState>,
+    process_state: tauri::State<'_, CoreProcessState>,
     gui_config_state: tauri::State<'_, GuiConfigState>,
     version: Option<String>,
 ) -> Result<CoreInstallResult, String> {
-    let proxy_url = gui_config_state.snapshot()?.proxy_url;
+    let config = gui_config_state.snapshot()?;
+    let proxy_url = config.proxy_url.clone();
     let token = CancellationToken::new();
     state.start(token.clone(), version.clone())?;
-    let result =
-        install_core_version_inner(&window, state.inner(), token, version, &proxy_url).await;
+    let (was_running, install_result) =
+        match pause_core_for_install(&app, process_state.inner(), &config) {
+            Ok(was_running) => (
+                was_running,
+                install_core_version_inner(
+                    &window,
+                    state.inner(),
+                    token,
+                    version,
+                    &proxy_url,
+                    config.selected_download_candidate(),
+                    config.custom_download_mirrors.clone(),
+                )
+                .await,
+            ),
+            Err(error) => (false, Err(error)),
+        };
+    let result = restore_core_after_install(
+        &app,
+        process_state.inner(),
+        &config,
+        was_running,
+        install_result,
+    );
     if result.is_err() {
         let _ = cleanup_core_work_dirs();
     }
     state.finish(&window, result.clone());
 
     result
+}
+
+fn install_core_with_runtime_restore<F>(
+    app: &tauri::AppHandle,
+    process_state: &CoreProcessState,
+    gui_config_state: &GuiConfigState,
+    install: F,
+) -> Result<CoreInstallResult, String>
+where
+    F: FnOnce() -> Result<CoreInstallResult, String>,
+{
+    let config = gui_config_state.snapshot()?;
+    let was_running = pause_core_for_install(app, process_state, &config)?;
+    let result = install();
+    restore_core_after_install(app, process_state, &config, was_running, result)
+}
+
+fn pause_core_for_install(
+    app: &tauri::AppHandle,
+    process_state: &CoreProcessState,
+    config: &GuiConfigFile,
+) -> Result<bool, String> {
+    let was_running = current_core_status(Some(process_state), Some(config.port))?.running;
+    if was_running {
+        stop_core_process_inner(process_state)?;
+        emit_current_core_status(app, process_state, config.port);
+    }
+    Ok(was_running)
+}
+
+fn restore_core_after_install<T>(
+    app: &tauri::AppHandle,
+    process_state: &CoreProcessState,
+    config: &GuiConfigFile,
+    was_running: bool,
+    install_result: Result<T, String>,
+) -> Result<T, String> {
+    let restart_result = if was_running {
+        start_core_process_inner(process_state, config)
+    } else {
+        Ok(())
+    };
+    emit_current_core_status(app, process_state, config.port);
+    combine_install_and_restart_results(install_result, restart_result)
+}
+
+pub(crate) fn combine_install_and_restart_results<T>(
+    install_result: Result<T, String>,
+    restart_result: Result<(), String>,
+) -> Result<T, String> {
+    match (install_result, restart_result) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Ok(_), Err(restart_error)) => {
+            Err(format!("内核已安装，但自动恢复运行失败: {restart_error}"))
+        }
+        (Err(install_error), Ok(())) => Err(install_error),
+        (Err(install_error), Err(restart_error)) => Err(format!(
+            "{install_error}；自动恢复原内核运行状态也失败: {restart_error}"
+        )),
+    }
+}
+
+fn emit_current_core_status(app: &tauri::AppHandle, process_state: &CoreProcessState, port: u16) {
+    if let Ok(status) = current_core_status(Some(process_state), Some(port)) {
+        emit_core_status(app, &status);
+    }
 }
 
 #[tauri::command]
@@ -170,11 +285,20 @@ pub(crate) async fn install_core_version_inner(
     token: CancellationToken,
     version: Option<String>,
     proxy_url: &str,
+    download_source: VersionDownloadCandidate,
+    custom_mirrors: Vec<String>,
 ) -> Result<CoreInstallResult, String> {
     let platform = current_core_platform()?;
-    let client = http_client(proxy_url)?;
+    let client = http_client(proxy_url, &custom_mirrors)?;
     state.progress(window, "检查版本", 0, None, true);
-    let release = fetch_release_cancelable(&client, version.as_deref(), &token).await?;
+    let (release, _) = fetch_release_cancelable(
+        &client,
+        version.as_deref(),
+        &token,
+        download_source,
+        &custom_mirrors,
+    )
+    .await?;
     let asset = select_release_asset(&release, &platform)?;
 
     let install_dir = core_install_dir()?;
@@ -305,31 +429,57 @@ pub(crate) fn install_bundled_core_inner(
 pub(crate) async fn fetch_release(
     client: &reqwest::Client,
     version: Option<&str>,
-) -> Result<GithubRelease, String> {
+    source: VersionDownloadCandidate,
+    custom_mirrors: &[String],
+) -> Result<(GithubRelease, VersionDownloadCandidate), String> {
     if let Some(version) = version {
-        return Ok(release_from_tag(version));
+        return Ok((
+            release_from_tag_for_repositories(
+                version,
+                configured_gitcode_core_repository(),
+                &source,
+            ),
+            source,
+        ));
     }
-    let atom_result = fetch_release_from_atom(client).await;
-    let github_result = match atom_result {
-        Ok(release) => Ok(release),
-        Err(atom_error) => fetch_release_from_page(client).await.map_err(|page_error| {
-            format!("GitHub 发布源请求失败: {atom_error}；release 页面请求失败: {page_error}")
-        }),
-    };
-    match github_result {
-        Ok(release) => Ok(release),
-        Err(github_error) => {
-            let Some(repository) = configured_gitcode_core_repository() else {
-                return Err(github_error);
-            };
-            fetch_release_from_gitcode(client, repository)
+    let gitcode_repository = configured_gitcode_core_repository();
+    let mut failures = Vec::new();
+    for candidate in
+        version_download_source_candidates(source, gitcode_repository.is_some(), custom_mirrors)
+    {
+        let result = match candidate.source {
+            VersionDownloadSource::Gitcode => {
+                fetch_release_from_gitcode(
+                    client,
+                    gitcode_repository.expect("GitCode candidate requires a configured repository"),
+                )
                 .await
-                .map_err(|gitcode_error| {
-                    format!(
-                        "GitHub 内核发布源失败: {github_error}；GitCode 回退源失败: {gitcode_error}"
-                    )
-                })
+            }
+            VersionDownloadSource::Github
+            | VersionDownloadSource::GhProxy
+            | VersionDownloadSource::GhFast
+            | VersionDownloadSource::Custom => fetch_release_from_github(client, &candidate).await,
+        };
+        match result {
+            Ok(release) => return Ok((release, candidate)),
+            Err(error) => failures.push(format!("{}: {error}", candidate.display_name())),
         }
+    }
+    Err(format!("所有内核版本检测源均失败: {}", failures.join("；")))
+}
+
+pub(crate) async fn fetch_release_from_github(
+    client: &reqwest::Client,
+    source: &VersionDownloadCandidate,
+) -> Result<GithubRelease, String> {
+    let atom_result = fetch_release_from_atom(client, source).await;
+    match atom_result {
+        Ok(release) => Ok(release),
+        Err(atom_error) => fetch_release_from_page(client, source)
+            .await
+            .map_err(|page_error| {
+                format!("GitHub 发布源请求失败: {atom_error}；release 页面请求失败: {page_error}")
+            }),
     }
 }
 
@@ -356,9 +506,11 @@ pub(crate) async fn fetch_release_from_gitcode(
 
 pub(crate) async fn fetch_release_from_page(
     client: &reqwest::Client,
+    source: &VersionDownloadCandidate,
 ) -> Result<GithubRelease, String> {
+    let release_page_url = version_source_url(source, RELEASE_PAGE_URL);
     let response = client
-        .get(RELEASE_PAGE_URL)
+        .get(release_page_url)
         .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml")
         .header(reqwest::header::USER_AGENT, USER_AGENT)
         .send()
@@ -376,14 +528,20 @@ pub(crate) async fn fetch_release_from_page(
 
     let tag = release_tag_from_url(&final_url)
         .ok_or_else(|| "GitHub release 页面没有返回版本标签".to_string())?;
-    Ok(release_from_tag(&tag))
+    Ok(release_from_tag_for_repositories(
+        &tag,
+        configured_gitcode_core_repository(),
+        source,
+    ))
 }
 
 pub(crate) async fn fetch_release_from_atom(
     client: &reqwest::Client,
+    source: &VersionDownloadCandidate,
 ) -> Result<GithubRelease, String> {
+    let release_atom_url = version_source_url(source, RELEASE_ATOM_URL);
     let response = client
-        .get(RELEASE_ATOM_URL)
+        .get(release_atom_url)
         .header(
             reqwest::header::ACCEPT,
             "application/atom+xml,application/xml,text/xml",
@@ -402,7 +560,11 @@ pub(crate) async fn fetch_release_from_atom(
     }
     let tag = release_tag_from_atom(&body)
         .ok_or_else(|| "GitHub Atom feed 没有返回版本标签".to_string())?;
-    Ok(release_from_tag(&tag))
+    Ok(release_from_tag_for_repositories(
+        &tag,
+        configured_gitcode_core_repository(),
+        source,
+    ))
 }
 
 pub(crate) fn release_tag_from_atom(xml: &str) -> Option<String> {
@@ -426,18 +588,27 @@ pub(crate) fn release_tag_from_atom(xml: &str) -> Option<String> {
     (!title.is_empty()).then(|| normalize_version(title))
 }
 
+#[cfg(test)]
 pub(crate) fn release_from_tag(tag: &str) -> GithubRelease {
-    release_from_tag_for_repositories(tag, configured_gitcode_core_repository(), false)
+    release_from_tag_for_repositories(
+        tag,
+        configured_gitcode_core_repository(),
+        &VersionDownloadCandidate::builtin(VersionDownloadSource::Github),
+    )
 }
 
 pub(crate) fn release_from_gitcode_tag(tag: &str, repository: &str) -> GithubRelease {
-    release_from_tag_for_repositories(tag, Some(repository), true)
+    release_from_tag_for_repositories(
+        tag,
+        Some(repository),
+        &VersionDownloadCandidate::builtin(VersionDownloadSource::Gitcode),
+    )
 }
 
 pub(crate) fn release_from_tag_for_repositories(
     tag: &str,
     gitcode_repository: Option<&str>,
-    prefer_gitcode: bool,
+    source: &VersionDownloadCandidate,
 ) -> GithubRelease {
     let tag = normalize_version(tag);
     let version = tag.trim_start_matches('v');
@@ -455,13 +626,24 @@ pub(crate) fn release_from_tag_for_repositories(
         let github_url = format!("{RELEASE_DOWNLOAD_PREFIX}{tag}/{name}");
         let gitcode_url = gitcode_repository
             .map(|repository| gitcode_release_attachment_url(repository, &tag, &name));
-        let (browser_download_url, fallback_download_urls) = if prefer_gitcode {
-            (
-                gitcode_url.unwrap_or_else(|| github_url.clone()),
-                Vec::new(),
-            )
-        } else {
-            (github_url, gitcode_url.into_iter().collect())
+        let (browser_download_url, fallback_download_urls) = match source.source {
+            VersionDownloadSource::Gitcode => match gitcode_url {
+                Some(gitcode_url) => (gitcode_url, vec![github_url]),
+                None => (github_url, Vec::new()),
+            },
+            VersionDownloadSource::GhProxy | VersionDownloadSource::GhFast => {
+                let mirror_url = version_source_url(source, &github_url);
+                let mut fallbacks = vec![github_url];
+                fallbacks.extend(gitcode_url);
+                (mirror_url, fallbacks)
+            }
+            VersionDownloadSource::Github => (github_url, gitcode_url.into_iter().collect()),
+            VersionDownloadSource::Custom => {
+                let mirror_url = version_source_url(source, &github_url);
+                let mut fallbacks = vec![github_url];
+                fallbacks.extend(gitcode_url);
+                (mirror_url, fallbacks)
+            }
         };
         GithubAsset {
             browser_download_url,
@@ -569,9 +751,11 @@ pub(crate) async fn fetch_release_cancelable(
     client: &reqwest::Client,
     version: Option<&str>,
     token: &CancellationToken,
-) -> Result<GithubRelease, String> {
+    source: VersionDownloadCandidate,
+    custom_mirrors: &[String],
+) -> Result<(GithubRelease, VersionDownloadCandidate), String> {
     tokio::select! {
-        result = fetch_release(client, version) => result,
+        result = fetch_release(client, version, source, custom_mirrors) => result,
         _ = token.cancelled() => Err("已取消下载".to_string()),
     }
 }
@@ -600,10 +784,13 @@ pub(crate) fn build_http_client_with_proxy(
         .map_err(|error| format!("{error_prefix}: {error}"))
 }
 
-pub(crate) fn http_client(proxy_url: &str) -> Result<reqwest::Client, String> {
+pub(crate) fn http_client(
+    proxy_url: &str,
+    custom_mirrors: &[String],
+) -> Result<reqwest::Client, String> {
     build_http_client_with_proxy(
         reqwest::Client::builder()
-            .redirect(release_https_redirect_policy())
+            .redirect(release_https_redirect_policy_with_mirrors(custom_mirrors))
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(600)),
@@ -658,7 +845,7 @@ pub(crate) async fn download_asset(
         if index > 0 {
             state.progress(
                 window,
-                "GitHub 下载失败，正在切换到 GitCode",
+                &format!("下载失败，正在切换到 {}", core_download_source_name(url)),
                 0,
                 asset.size,
                 true,
@@ -692,6 +879,24 @@ pub(crate) async fn download_asset(
         return Err("内核发行版没有可用的下载地址".to_string());
     }
     Err(format!("所有内核下载源均失败: {}", failures.join("；")))
+}
+
+pub(crate) fn core_download_source_name(url: &str) -> String {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string));
+    match host.as_deref() {
+        Some("gh-proxy.com") => "gh-proxy.com".to_string(),
+        Some("ghfast.top") => "ghfast.top".to_string(),
+        Some(host) if host == "api.gitcode.com" || host.ends_with(".gitcode.com") => {
+            "GitCode".to_string()
+        }
+        Some(
+            "github.com" | "objects.githubusercontent.com" | "release-assets.githubusercontent.com",
+        ) => "GitHub".to_string(),
+        Some(host) => host.to_string(),
+        None => "GitHub".to_string(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -867,7 +1072,11 @@ pub(crate) fn start_core_process_inner(
     let binary_path = find_core_binary(&install_dir)
         .ok_or_else(|| "未安装 CPA 内核，请先安装最新版".to_string())?;
 
-    if process_state.managed_pid().is_some() || is_core_running(&binary_path) {
+    let existing_process_ids = find_core_process_ids(&binary_path);
+    if process_state.managed_pid().is_some() || !existing_process_ids.is_empty() {
+        if !existing_process_ids.is_empty() {
+            process_state.adopt_process_ids(&binary_path, existing_process_ids)?;
+        }
         return Err("CPA 内核已经在运行".to_string());
     }
     let management_address = core_management_address(&gui_config.host, gui_config.port)?;
@@ -988,26 +1197,52 @@ pub(crate) fn configure_networked_command(command: &mut Command, proxy_url: &str
 }
 
 pub(crate) fn stop_core_process_inner(process_state: &CoreProcessState) -> Result<(), String> {
+    let mut stopped_any = false;
+    let mut errors = Vec::new();
+
     if let Some(mut child) = process_state.take_child() {
-        terminate_child(&mut child)?;
+        stopped_any = true;
+        if let Err(error) = terminate_child(&mut child) {
+            errors.push(error);
+        }
         process_state.clear_lifetime_guard();
-        return Ok(());
     }
 
-    let install_dir = core_install_dir()?;
-    let binary_path = find_core_binary(&install_dir)
-        .ok_or_else(|| "未安装 CPA 内核，请先安装最新版".to_string())?;
-    let process_ids = find_core_process_ids(&binary_path);
-
-    if process_ids.is_empty() {
-        return Err("CPA 内核当前未运行".to_string());
+    let mut process_ids = process_state
+        .take_adopted_processes()
+        .into_iter()
+        .filter(|process| {
+            process_executable_path(process.process_id)
+                .as_deref()
+                .is_some_and(|path| executable_paths_match(&process.binary_path, path))
+        })
+        .map(|process| process.process_id)
+        .collect::<Vec<_>>();
+    if let Ok(install_dir) = core_install_dir() {
+        if let Some(binary_path) = find_core_binary(&install_dir) {
+            process_ids.extend(find_core_process_ids(&binary_path));
+        }
     }
+    process_ids.sort_unstable();
+    process_ids.dedup();
 
     for process_id in process_ids {
-        terminate_process_id(process_id)?;
+        if !is_process_alive(process_id) {
+            continue;
+        }
+        stopped_any = true;
+        if let Err(error) = terminate_process_id(process_id) {
+            errors.push(error);
+        }
     }
 
-    Ok(())
+    if !errors.is_empty() {
+        Err(errors.join("；"))
+    } else if stopped_any {
+        Ok(())
+    } else {
+        Err("CPA 内核当前未运行".to_string())
+    }
 }
 
 pub(crate) fn core_install_dir() -> Result<PathBuf, String> {
@@ -1409,75 +1644,76 @@ pub(crate) fn is_core_running(binary_path: &Path) -> bool {
 }
 
 pub(crate) fn find_core_process_ids(binary_path: &Path) -> Vec<u32> {
-    #[cfg(target_os = "linux")]
-    {
-        find_core_process_ids_linux(binary_path)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = binary_path;
-        find_core_process_ids_by_name()
-    }
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn find_core_process_ids_linux(binary_path: &Path) -> Vec<u32> {
-    let Ok(expected) = fs::canonicalize(binary_path) else {
-        return Vec::new();
-    };
-    let output = Command::new("pgrep")
-        .args(["-x", core_binary_name()])
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .filter(|pid| {
-            fs::read_link(format!("/proc/{pid}/exe"))
-                .ok()
-                .and_then(|path| fs::canonicalize(path).ok())
-                .map(|path| path == expected)
-                .unwrap_or(false)
+    find_candidate_core_process_ids()
+        .into_iter()
+        .filter(|process_id| {
+            process_executable_path(*process_id)
+                .as_deref()
+                .is_some_and(|path| executable_paths_match(binary_path, path))
         })
         .collect()
+}
+
+pub(crate) fn executable_paths_match(expected: &Path, actual: &Path) -> bool {
+    let expected = fs::canonicalize(expected).unwrap_or_else(|_| expected.to_path_buf());
+    let actual = fs::canonicalize(actual).unwrap_or_else(|_| actual.to_path_buf());
+
+    #[cfg(windows)]
+    {
+        path_to_string(&expected).eq_ignore_ascii_case(&path_to_string(&actual))
+    }
+
+    #[cfg(not(windows))]
+    {
+        expected == actual
+    }
 }
 
 #[cfg(all(not(target_os = "linux"), target_os = "windows"))]
-pub(crate) fn find_core_process_ids_by_name() -> Vec<u32> {
-    let image_name = core_binary_name();
-    let filter = format!("IMAGENAME eq {image_name}");
-    let mut command = Command::new("tasklist");
-    command.args(["/FI", &filter, "/FO", "CSV", "/NH"]);
-    configure_background_command(&mut command);
-    let output = command.output();
-    let Ok(output) = output else {
-        return Vec::new();
+pub(crate) fn find_candidate_core_process_ids() -> Vec<u32> {
+    use std::{ffi::OsString, mem, os::windows::ffi::OsStringExt};
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        },
     };
 
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let columns = line
-                .trim()
-                .trim_matches('"')
-                .split("\",\"")
-                .collect::<Vec<_>>();
-            let name = columns.first()?;
-            let pid = columns.get(1)?;
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Vec::new();
+    }
 
-            name.eq_ignore_ascii_case(image_name)
-                .then(|| pid.parse::<u32>().ok())
-                .flatten()
-        })
-        .collect()
+    let mut entry = unsafe { mem::zeroed::<PROCESSENTRY32W>() };
+    entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut process_ids = Vec::new();
+    if unsafe { Process32FirstW(snapshot, &mut entry) } != 0 {
+        loop {
+            let name_length = entry
+                .szExeFile
+                .iter()
+                .position(|character| *character == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let image_name = OsString::from_wide(&entry.szExeFile[..name_length]);
+            if entry.th32ProcessID != 0
+                && image_name
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(core_binary_name())
+            {
+                process_ids.push(entry.th32ProcessID);
+            }
+            if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
+                break;
+            }
+        }
+    }
+    unsafe { CloseHandle(snapshot) };
+    process_ids
 }
 
 #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
-pub(crate) fn find_core_process_ids_by_name() -> Vec<u32> {
+pub(crate) fn find_candidate_core_process_ids() -> Vec<u32> {
     Command::new("pgrep")
         .args(["-x", core_binary_name()])
         .output()
@@ -1491,17 +1727,99 @@ pub(crate) fn find_core_process_ids_by_name() -> Vec<u32> {
         .unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn find_candidate_core_process_ids() -> Vec<u32> {
+    Command::new("pgrep")
+        .args(["-x", core_binary_name()])
+        .output()
+        .ok()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.trim().parse::<u32>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn process_executable_path(process_id: u32) -> Option<PathBuf> {
+    fs::read_link(format!("/proc/{process_id}/exe")).ok()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn process_executable_path(process_id: u32) -> Option<PathBuf> {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    extern "C" {
+        fn proc_pidpath(pid: i32, buffer: *mut std::ffi::c_void, buffer_size: u32) -> i32;
+    }
+
+    let mut buffer = vec![0_u8; 4096];
+    let length = unsafe {
+        proc_pidpath(
+            process_id.try_into().ok()?,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+        )
+    };
+    if length <= 0 {
+        return None;
+    }
+    buffer.truncate(length as usize);
+    Some(PathBuf::from(OsString::from_vec(buffer)))
+}
+
+#[cfg(windows)]
+pub(crate) fn process_executable_path(process_id: u32) -> Option<PathBuf> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut buffer = vec![0_u16; 32_768];
+    let mut length = buffer.len() as u32;
+    let success =
+        unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) };
+    unsafe { CloseHandle(handle as HANDLE) };
+    if success == 0 {
+        return None;
+    }
+    buffer.truncate(length as usize);
+    Some(PathBuf::from(OsString::from_wide(&buffer)))
+}
+
+pub(crate) fn adopt_existing_core_processes(
+    process_state: &CoreProcessState,
+) -> Result<Vec<u32>, String> {
+    let install_dir = core_install_dir()?;
+    let Some(binary_path) = find_core_binary(&install_dir) else {
+        process_state.clear_adopted_processes()?;
+        return Ok(Vec::new());
+    };
+    let process_ids = find_core_process_ids(&binary_path);
+    process_state.adopt_process_ids(&binary_path, process_ids.clone())?;
+    Ok(process_ids)
+}
+
 pub(crate) fn shutdown_managed_core(
     process_state: &CoreProcessState,
     gui_config_state: &GuiConfigState,
 ) {
-    let was_running = process_state.managed_pid().is_some();
+    let was_running = process_state.managed_pid().is_some()
+        || core_install_dir()
+            .ok()
+            .and_then(|install_dir| find_core_binary(&install_dir))
+            .is_some_and(|binary_path| is_core_running(&binary_path));
     let _ = gui_config_state.set_run_on_startup(was_running);
-
-    if let Some(mut child) = process_state.take_child() {
-        let _ = terminate_child(&mut child);
-    }
-    process_state.clear_lifetime_guard();
+    let _ = stop_core_process_inner(process_state);
 }
 
 #[cfg(windows)]
@@ -1644,6 +1962,23 @@ pub(crate) fn send_process_signal(process_id: u32, signal: &str) -> Result<(), S
     } else {
         Err(format!("发送进程信号失败: PID {process_id}"))
     }
+}
+
+#[cfg(windows)]
+pub(crate) fn is_process_alive(process_id: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_TIMEOUT},
+        System::Threading::{OpenProcess, WaitForSingleObject},
+    };
+
+    const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+    let handle = unsafe { OpenProcess(SYNCHRONIZE_ACCESS, 0, process_id) };
+    if handle.is_null() {
+        return false;
+    }
+    let result = unsafe { WaitForSingleObject(handle, 0) };
+    unsafe { CloseHandle(handle) };
+    result == WAIT_TIMEOUT
 }
 
 #[cfg(not(windows))]

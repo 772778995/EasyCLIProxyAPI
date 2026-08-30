@@ -24,6 +24,14 @@ EasyCLIProxyAPI 是基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProx
 软件基于 Tauri、React 和 Rust 构建，并可携带匹配版本的 CLIProxyAPI 内核压缩包，
 让首次安装和离线安装更加方便。
 
+## 赞助商
+
+[![https://go.apimart.ai/gh-easycliproxyapi](./assets/apimart-zh.png)](https://go.apimart.ai/gh-easycliproxyapi)
+
+感谢 APIMart 对本项目的赞助！
+
+APIMart 是一个低成本的 AI 图像与视频生成 API 平台——GPT-Image-2 每张图片低至 0.006 美元，1 美元可生成 160 多张图片。一个异步 API 即可处理图像和视频：提交任务、获取任务 ID，再通过轮询或回调获取结果。无需担心超时，即可批量生成数万张图片；切换模型也无需修改代码。按量付费，无月费——[立即注册](https://go.apimart.ai/gh-easycliproxyapi)即可开始使用。
+
 ## 功能导览
 
 ### 首页与本地 API 地址
@@ -37,7 +45,7 @@ EasyCLIProxyAPI 是基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProx
 - 复制可直接使用的 OpenAI、Claude 和 Gemini 兼容 API 地址。
 - 查看本地连接状态。
 
-内核安装、版本对比和离线安装功能位于 **版本管理** 页面。
+内核安装、版本对比和离线安装功能位于 **版本管理** 页面；可在此切换 GitHub 官方源、GitCode 国内源或 GitHub 镜像代理，也可以添加自定义 HTTPS 镜像前缀。软件与内核更新会优先使用所选渠道，并在失败时自动回退。
 
 ### OAuth 账号授权
 

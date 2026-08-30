@@ -2,6 +2,8 @@ mod resp;
 
 #[cfg(target_os = "macos")]
 use super::executable_dir;
+#[cfg(test)]
+use super::VersionDownloadSource;
 use super::{
     apply_configured_proxy, core_base_dir, current_core_status, management_authorization,
     management_endpoint, management_http_client, CoreProcessState, GuiConfigFile, GuiConfigState,
@@ -33,9 +35,12 @@ const LEGACY_USAGE_EVENTS_DIR: &str = "events";
 const LEGACY_USAGE_INBOX_DIR: &str = "inbox";
 const LEGACY_JSON_MIGRATION_KEY: &str = "legacy_json_v1";
 const USAGE_DATABASE_MIGRATION_KEY: &str = "keeper_v3";
+const USAGE_FAILURE_MIGRATION_KEY: &str = "failure_details_v4";
+const USAGE_EVENT_KEY_MIGRATION_KEY: &str = "event_key_v5";
 const USAGE_UPDATED_EVENT: &str = "usage-records-updated";
 const USAGE_SCHEMA_VERSION: u8 = 1;
-const USAGE_DATABASE_SCHEMA_VERSION: i64 = 3;
+const USAGE_DATABASE_SCHEMA_VERSION: i64 = 5;
+const MAX_USAGE_FAILURE_BODY_CHARS: usize = 2_000;
 const USAGE_QUEUE_BATCH_SIZE: usize = 500;
 const USAGE_INBOX_PROCESS_LIMIT: usize = 500;
 const USAGE_INBOX_MAX_ATTEMPTS: i64 = 5;
@@ -150,6 +155,12 @@ pub(crate) struct UsageRecord {
     #[serde(default)]
     failed: bool,
     #[serde(default)]
+    canceled: bool,
+    #[serde(default)]
+    failure_status: u16,
+    #[serde(default)]
+    failure_body: String,
+    #[serde(default)]
     provider: String,
     #[serde(default, skip_serializing)]
     api_group_key: String,
@@ -224,6 +235,8 @@ pub(crate) struct UsageQuery {
     #[serde(default)]
     failed: Option<bool>,
     #[serde(default)]
+    canceled: Option<bool>,
+    #[serde(default)]
     page: Option<usize>,
     #[serde(default)]
     page_size: Option<usize>,
@@ -235,6 +248,7 @@ pub(crate) struct UsageOverview {
     total_requests: u64,
     success_count: u64,
     failure_count: u64,
+    canceled_count: u64,
     success_rate: f64,
     input_tokens: u64,
     output_tokens: u64,
@@ -245,11 +259,20 @@ pub(crate) struct UsageOverview {
     rpm: f64,
     tpm: f64,
     tps: f64,
+    tps_sample_count: u64,
     average_latency_ms: f64,
     cache_hit_rate: f64,
     estimated_cost: f64,
     priced_requests: u64,
     timeline: Vec<UsageTimelinePoint>,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UsageRepairResult {
+    scanned: u64,
+    repaired: u64,
+    backup_path: Option<String>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -355,6 +378,7 @@ struct UsageTimelinePoint {
     requests: u64,
     success: u64,
     failure: u64,
+    canceled: u64,
     tokens: u64,
 }
 
@@ -518,10 +542,87 @@ fn initialize_usage_storage_at(root: &Path) -> Result<(), String> {
     cleanup_usage_inbox(&connection, Local::now())
 }
 
+#[tauri::command]
+pub(crate) fn repair_usage_cache_records() -> Result<UsageRepairResult, String> {
+    let root = usage_root_dir()?;
+    repair_usage_cache_records_at(&root)
+}
+
+fn repair_usage_cache_records_at(root: &Path) -> Result<UsageRepairResult, String> {
+    let mut connection = open_usage_database_at(root)?;
+    let candidate_count: i64 = connection
+        .query_row(
+            r#"SELECT COUNT(*) FROM usage_events
+               WHERE input_tokens > 0
+                 AND cache_read_tokens + cache_creation_tokens > input_tokens
+                 AND (lower(executor_type) = 'claudeexecutor'
+                      OR lower(provider) = 'claude'
+                      OR lower(provider) LIKE '%anthropic%')"#,
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查 Claude 使用记录异常行失败: {error}"))?;
+
+    if candidate_count <= 0 {
+        return Ok(UsageRepairResult::default());
+    }
+
+    let backup_path = {
+        let backup_dir = root.join(USAGE_BACKUP_DIR_NAME);
+        fs::create_dir_all(&backup_dir)
+            .map_err(|error| format!("创建 Claude 使用记录迁移备份目录失败: {error}"))?;
+        let backup_path = backup_dir.join(format!(
+            "usage-before-claude-input-v1-{}.db",
+            unique_file_stamp()
+        ));
+        connection
+            .execute(
+                "VACUUM INTO ?1",
+                params![backup_path.to_string_lossy().to_string()],
+            )
+            .map_err(|error| format!("备份 Claude 使用记录失败: {error}"))?;
+        backup_path.to_string_lossy().to_string()
+    };
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("开始 Claude 使用记录迁移事务失败: {error}"))?;
+    let migrated = transaction
+        .execute(
+            r#"UPDATE usage_events
+               SET input_tokens = input_tokens + cache_read_tokens + cache_creation_tokens,
+                   total_tokens = CASE
+                       WHEN total_tokens = 0
+                            OR total_tokens = input_tokens + output_tokens
+                       THEN input_tokens + cache_read_tokens + cache_creation_tokens + output_tokens
+                       ELSE total_tokens
+                   END,
+                   cached_tokens = MAX(cached_tokens, cache_read_tokens + cache_creation_tokens)
+               WHERE input_tokens > 0
+                 AND cache_read_tokens + cache_creation_tokens > input_tokens
+                 AND (lower(executor_type) = 'claudeexecutor'
+                      OR lower(provider) = 'claude'
+                      OR lower(provider) LIKE '%anthropic%')"#,
+            [],
+        )
+        .map_err(|error| format!("迁移 Claude 使用记录失败: {error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("提交 Claude 使用记录迁移失败: {error}"))?;
+    Ok(UsageRepairResult {
+        scanned: candidate_count.max(0) as u64,
+        repaired: migrated as u64,
+        backup_path: Some(backup_path),
+    })
+}
+
 fn migrate_usage_database(connection: &mut Connection, root: &Path) -> Result<(), String> {
     match detect_usage_database_layout(connection)? {
         UsageDatabaseLayout::Empty => initialize_usage_schema(connection),
-        UsageDatabaseLayout::CurrentV3 => initialize_usage_schema(connection),
+        UsageDatabaseLayout::CurrentV3 => {
+            initialize_usage_schema(connection)?;
+            migrate_usage_event_key_uniqueness(connection)
+        }
         UsageDatabaseLayout::LegacyV2 => {
             let backup_path = create_usage_migration_backup(connection, root)?;
             if let Err(error) = migrate_legacy_v2_usage_schema(connection) {
@@ -603,6 +704,224 @@ fn usage_table_columns(connection: &Connection, table: &str) -> Result<HashSet<S
     Ok(columns)
 }
 
+fn migrate_usage_event_key_uniqueness(connection: &mut Connection) -> Result<(), String> {
+    let migrated = connection
+        .query_row(
+            "SELECT value FROM usage_metadata WHERE key = ?1",
+            params![USAGE_EVENT_KEY_MIGRATION_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("read usage event key migration state failed: {error}"))?;
+    if migrated.is_some() {
+        return Ok(());
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("begin usage event key migration failed: {error}"))?;
+    ensure_usage_event_key_non_unique_in_transaction(&transaction)?;
+    transaction
+        .execute(
+            "INSERT INTO usage_metadata (key, value) VALUES (?1, ?2)",
+            params![USAGE_EVENT_KEY_MIGRATION_KEY, Local::now().to_rfc3339()],
+        )
+        .map_err(|error| format!("record usage event key migration state failed: {error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("commit usage event key migration failed: {error}"))
+}
+
+fn ensure_usage_event_key_non_unique_in_transaction(connection: &Connection) -> Result<(), String> {
+    if !usage_table_exists(connection, "usage_events")? {
+        return Ok(());
+    }
+
+    let unique_indexes = usage_event_key_unique_indexes(connection)?;
+    if unique_indexes.is_empty() {
+        create_usage_event_key_index(connection)?;
+        return Ok(());
+    }
+
+    if unique_indexes
+        .iter()
+        .all(|(_, is_auto_index)| !is_auto_index)
+    {
+        for (index_name, _) in unique_indexes {
+            connection
+                .execute(
+                    &format!(
+                        "DROP INDEX IF EXISTS {}",
+                        quote_sqlite_identifier(&index_name)
+                    ),
+                    [],
+                )
+                .map_err(|error| {
+                    format!("drop unique usage event key index {index_name} failed: {error}")
+                })?;
+        }
+        create_usage_event_key_index(connection)?;
+        return Ok(());
+    }
+
+    rebuild_usage_events_without_event_key_unique(connection, &unique_indexes)
+}
+
+fn usage_event_key_unique_indexes(connection: &Connection) -> Result<Vec<(String, bool)>, String> {
+    let index_names = {
+        let mut statement = connection
+            .prepare("SELECT name FROM pragma_index_list(?1) WHERE \"unique\" != 0 ORDER BY seq")
+            .map_err(|error| format!("prepare usage event key index query failed: {error}"))?;
+        let index_names = statement
+            .query_map(params!["usage_events"], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("query usage event key indexes failed: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("read usage event key indexes failed: {error}"))?;
+        index_names
+    };
+
+    let mut matches = Vec::new();
+    for index_name in index_names {
+        let mut statement = connection
+            .prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")
+            .map_err(|error| format!("prepare usage event key index columns failed: {error}"))?;
+        let columns = statement
+            .query_map(params![index_name.as_str()], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("query usage event key index columns failed: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("read usage event key index columns failed: {error}"))?;
+        if columns.len() == 1 && columns[0] == "event_key" {
+            matches.push((
+                index_name.clone(),
+                index_name.starts_with("sqlite_autoindex_"),
+            ));
+        }
+    }
+    Ok(matches)
+}
+
+fn rebuild_usage_events_without_event_key_unique(
+    connection: &Connection,
+    unique_indexes: &[(String, bool)],
+) -> Result<(), String> {
+    let table_sql = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params!["usage_events"],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| format!("read usage events table schema failed: {error}"))?;
+    let temporary_table = format!("usage_events_rebuild_{}", unique_file_stamp());
+    let create_table_sql = replace_sql_fragment_case_insensitive(
+        &table_sql,
+        "create table usage_events",
+        &format!("CREATE TABLE {temporary_table}"),
+    )
+    .or_else(|| {
+        replace_sql_fragment_case_insensitive(
+            &table_sql,
+            "create table if not exists usage_events",
+            &format!("CREATE TABLE {temporary_table}"),
+        )
+    })
+    .ok_or_else(|| "usage events table schema has an unsupported CREATE TABLE form".to_string())?;
+    let create_table_sql = replace_sql_fragment_case_insensitive(
+        &create_table_sql,
+        "event_key text not null unique",
+        "event_key TEXT NOT NULL",
+    )
+    .ok_or_else(|| {
+        "usage events table schema does not contain the expected unique event_key constraint"
+            .to_string()
+    })?;
+
+    let unique_index_names = unique_indexes
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<HashSet<_>>();
+    let index_sqls = {
+        let mut statement = connection
+            .prepare(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL ORDER BY name",
+            )
+            .map_err(|error| format!("prepare usage event index schema query failed: {error}"))?;
+        let index_sqls = statement
+            .query_map(params!["usage_events"], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("query usage event index schemas failed: {error}"))?
+            .filter_map(|row| match row {
+                Ok((name, sql)) if !unique_index_names.contains(name.as_str()) => Some(Ok(sql)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("read usage event index schemas failed: {error}"))?;
+        index_sqls
+    };
+
+    connection
+        .execute_batch(&create_table_sql)
+        .map_err(|error| format!("create rebuilt usage events table failed: {error}"))?;
+    connection
+        .execute(
+            &format!(
+                "INSERT INTO {} SELECT * FROM usage_events",
+                quote_sqlite_identifier(&temporary_table)
+            ),
+            [],
+        )
+        .map_err(|error| format!("copy usage events during event key migration failed: {error}"))?;
+    connection
+        .execute("DROP TABLE usage_events", [])
+        .map_err(|error| format!("drop old usage events table failed: {error}"))?;
+    connection
+        .execute(
+            &format!(
+                "ALTER TABLE {} RENAME TO usage_events",
+                quote_sqlite_identifier(&temporary_table)
+            ),
+            [],
+        )
+        .map_err(|error| format!("rename rebuilt usage events table failed: {error}"))?;
+
+    for index_sql in index_sqls {
+        connection
+            .execute_batch(&index_sql)
+            .map_err(|error| format!("restore usage event index failed: {error}"))?;
+    }
+    create_usage_event_key_index(connection)
+}
+
+fn create_usage_event_key_index(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_event_key ON usage_events(event_key)",
+            [],
+        )
+        .map(|_| ())
+        .map_err(|error| format!("create usage event key index failed: {error}"))
+}
+
+fn quote_sqlite_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn replace_sql_fragment_case_insensitive(
+    value: &str,
+    needle: &str,
+    replacement: &str,
+) -> Option<String> {
+    let value_lower = value.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    let start = value_lower.find(&needle_lower)?;
+    let mut result = String::with_capacity(value.len() + replacement.len());
+    result.push_str(&value[..start]);
+    result.push_str(replacement);
+    result.push_str(&value[start + needle.len()..]);
+    Some(result)
+}
+
 fn create_usage_migration_backup(connection: &Connection, root: &Path) -> Result<PathBuf, String> {
     let backup_dir = root.join(USAGE_BACKUP_DIR_NAME);
     fs::create_dir_all(&backup_dir)
@@ -665,6 +984,13 @@ fn migrate_legacy_v2_usage_schema(connection: &mut Connection) -> Result<(), Str
         ));
     }
     initialize_usage_schema(&transaction)?;
+    ensure_usage_event_key_non_unique_in_transaction(&transaction)?;
+    transaction
+        .execute(
+            "INSERT INTO usage_metadata (key, value) VALUES (?1, ?2)",
+            params![USAGE_EVENT_KEY_MIGRATION_KEY, Local::now().to_rfc3339()],
+        )
+        .map_err(|error| format!("record usage event key migration state failed: {error}"))?;
     transaction
         .execute(
             "INSERT INTO usage_metadata (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -727,7 +1053,7 @@ fn initialize_usage_schema(connection: &Connection) -> Result<(), String> {
 
             CREATE TABLE IF NOT EXISTS usage_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_key TEXT NOT NULL UNIQUE,
+                event_key TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 timestamp_ms INTEGER NOT NULL,
                 local_hour TEXT NOT NULL,
@@ -736,6 +1062,9 @@ fn initialize_usage_schema(connection: &Connection) -> Result<(), String> {
                 source TEXT NOT NULL DEFAULT '',
                 auth_index TEXT NOT NULL DEFAULT '',
                 failed INTEGER NOT NULL DEFAULT 0,
+                canceled INTEGER NOT NULL DEFAULT 0,
+                failure_status INTEGER NOT NULL DEFAULT 0,
+                failure_body TEXT NOT NULL DEFAULT '',
                 provider TEXT NOT NULL DEFAULT '',
                 model TEXT NOT NULL DEFAULT '',
                 alias TEXT NOT NULL DEFAULT '',
@@ -768,6 +1097,8 @@ fn initialize_usage_schema(connection: &Connection) -> Result<(), String> {
 
             CREATE INDEX IF NOT EXISTS idx_usage_events_timestamp
                 ON usage_events(timestamp_ms DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_event_key
+                ON usage_events(event_key);
             CREATE INDEX IF NOT EXISTS idx_usage_events_local_hour
                 ON usage_events(local_hour, timestamp_ms DESC);
             CREATE INDEX IF NOT EXISTS idx_usage_events_model_timestamp
@@ -824,9 +1155,109 @@ fn initialize_usage_schema(connection: &Connection) -> Result<(), String> {
             "#,
         )
         .map_err(|error| format!("初始化 SQLite 使用记录结构失败: {error}"))?;
+    ensure_usage_failure_columns(connection)?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_canceled_timestamp ON usage_events(canceled, timestamp_ms DESC)",
+            [],
+        )
+        .map_err(|error| format!("创建 SQLite 取消记录索引失败: {error}"))?;
     connection
         .pragma_update(None, "user_version", USAGE_DATABASE_SCHEMA_VERSION)
         .map_err(|error| format!("更新 SQLite 使用记录版本失败: {error}"))
+}
+
+fn ensure_usage_failure_columns(connection: &Connection) -> Result<(), String> {
+    let mut columns = usage_table_columns(connection, "usage_events")?;
+    for (column, definition) in [
+        ("canceled", "INTEGER NOT NULL DEFAULT 0"),
+        ("failure_status", "INTEGER NOT NULL DEFAULT 0"),
+        ("failure_body", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        if columns.contains(column) {
+            continue;
+        }
+        connection
+            .execute(
+                &format!("ALTER TABLE usage_events ADD COLUMN {column} {definition}"),
+                [],
+            )
+            .map_err(|error| format!("添加 SQLite 使用记录字段 {column} 失败: {error}"))?;
+        columns.insert(column.to_string());
+    }
+    backfill_usage_failure_details(connection)?;
+    Ok(())
+}
+
+fn backfill_usage_failure_details(connection: &Connection) -> Result<(), String> {
+    let migrated = connection
+        .query_row(
+            "SELECT value FROM usage_metadata WHERE key = ?1",
+            params![USAGE_FAILURE_MIGRATION_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("读取使用记录失败详情迁移状态失败: {error}"))?;
+    if migrated.is_some() {
+        return Ok(());
+    }
+
+    if usage_table_exists(connection, "usage_inbox")? {
+        let rows = {
+            let mut statement = connection
+                .prepare(
+                    r#"
+                    SELECT usage_event_key, raw_message
+                    FROM usage_inbox
+                    WHERE status = 'processed' AND usage_event_key != ''
+                    "#,
+                )
+                .map_err(|error| format!("准备回填使用记录失败详情失败: {error}"))?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|error| format!("查询使用记录失败详情失败: {error}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("读取使用记录失败详情失败: {error}"))?;
+            rows
+        };
+        for (event_key, raw_message) in rows {
+            let Some(object) = serde_json::from_str::<Value>(&raw_message)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+            else {
+                continue;
+            };
+            if !object
+                .get("failed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let (failure_status, failure_body) = usage_failure_details(&object);
+            let canceled = usage_failure_is_canceled(failure_status, &failure_body);
+            connection
+                .execute(
+                    r#"
+                    UPDATE usage_events
+                    SET canceled = ?1, failure_status = ?2, failure_body = ?3
+                    WHERE event_key = ?4
+                    "#,
+                    params![canceled, i64::from(failure_status), failure_body, event_key],
+                )
+                .map_err(|error| format!("回填使用记录失败详情失败: {error}"))?;
+        }
+    }
+
+    connection
+        .execute(
+            "INSERT INTO usage_metadata (key, value) VALUES (?1, ?2)",
+            params![USAGE_FAILURE_MIGRATION_KEY, Local::now().to_rfc3339()],
+        )
+        .map_err(|error| format!("记录使用记录失败详情迁移状态失败: {error}"))?;
+    Ok(())
 }
 
 fn open_usage_database() -> Result<Connection, String> {
@@ -1534,7 +1965,7 @@ fn insert_usage_records_in_transaction(
     let mut statement = transaction
         .prepare(
             r#"
-            INSERT OR IGNORE INTO usage_events (
+            INSERT INTO usage_events (
                 event_key, timestamp, timestamp_ms, local_hour, latency_ms, ttft_ms,
                 source, auth_index, failed, provider, model, alias, reasoning_effort,
                 service_tier, response_service_tier, executor_type, endpoint, auth_type,
@@ -1542,12 +1973,13 @@ fn insert_usage_records_in_transaction(
                 api_group_key, model_alias, client_ip, x_forwarded_for, user_agent,
                 generate, cached_tokens, collector_source,
                 input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
-                cache_creation_tokens, total_tokens, created_at
+                cache_creation_tokens, total_tokens, canceled, failure_status,
+                failure_body, created_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                 ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
                 ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-                ?31, ?32, ?33, ?34, ?35, ?36, ?37
+                ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40
             )
             "#,
         )
@@ -1566,12 +1998,25 @@ fn insert_usage_records_in_transaction(
         } else {
             "unknown"
         };
-        let cached_tokens = record.cached_tokens.max(
-            record
-                .tokens
-                .cache_read_tokens
-                .saturating_add(record.tokens.cache_creation_tokens),
-        );
+        let cache_components = record
+            .tokens
+            .cache_read_tokens
+            .saturating_add(record.tokens.cache_creation_tokens);
+        let input_before_invariant = record.tokens.input_tokens;
+        let input_tokens = if cache_components > input_before_invariant {
+            input_before_invariant.saturating_add(cache_components)
+        } else {
+            input_before_invariant
+        };
+        let total_tokens = if record.tokens.total_tokens == 0
+            || record.tokens.total_tokens
+                == input_before_invariant.saturating_add(record.tokens.output_tokens)
+        {
+            input_tokens.saturating_add(record.tokens.output_tokens)
+        } else {
+            record.tokens.total_tokens
+        };
+        let cached_tokens = record.cached_tokens.max(cache_components);
         let collector_source = if record.collector_source.trim().is_empty() {
             "legacy_json"
         } else {
@@ -1614,12 +2059,15 @@ fn insert_usage_records_in_transaction(
                     record.generate,
                     to_sql_i64(cached_tokens),
                     collector_source,
-                    to_sql_i64(record.tokens.input_tokens),
+                    to_sql_i64(input_tokens),
                     to_sql_i64(record.tokens.output_tokens),
                     to_sql_i64(record.tokens.reasoning_tokens),
                     to_sql_i64(record.tokens.cache_read_tokens),
                     to_sql_i64(record.tokens.cache_creation_tokens),
-                    to_sql_i64(record.tokens.total_tokens),
+                    to_sql_i64(total_tokens),
+                    record.canceled,
+                    i64::from(record.failure_status),
+                    record.failure_body,
                     created_at,
                 ])
                 .map_err(|error| format!("写入 SQLite 使用记录失败: {error}"))?,
@@ -1644,22 +2092,60 @@ fn normalize_usage_record(value: Value, config: &GuiConfigFile) -> Result<UsageR
         .find(|entry| entry.key == api_key)
         .map(|entry| entry.remark.clone())
         .unwrap_or_default();
+    let provider = string_field(object, "provider").unwrap_or_default();
+    let executor_type = string_field(object, "executor_type").unwrap_or_default();
     let tokens_object = object.get("tokens").and_then(Value::as_object);
+    let cache_read_present = tokens_object
+        .and_then(|tokens| tokens.get("cache_read_tokens"))
+        .is_some();
     let raw_cache_read_tokens = token_u64(tokens_object, "cache_read_tokens");
     let cache_creation_tokens = token_u64(tokens_object, "cache_creation_tokens");
     let raw_cached_tokens =
         token_u64(tokens_object, "cached_tokens").max(token_u64(tokens_object, "cache_tokens"));
-    let compatible_cached_tokens = raw_cached_tokens
-        .saturating_sub(raw_cache_read_tokens.saturating_add(cache_creation_tokens));
+    let normalized_cache_read_tokens = if cache_read_present {
+        raw_cache_read_tokens
+    } else {
+        raw_cached_tokens
+    };
+    let raw_input_tokens = token_u64(tokens_object, "input_tokens");
     let mut tokens = UsageTokenStats {
-        input_tokens: token_u64(tokens_object, "input_tokens"),
+        input_tokens: raw_input_tokens,
         output_tokens: token_u64(tokens_object, "output_tokens"),
         reasoning_tokens: token_u64(tokens_object, "reasoning_tokens"),
-        cache_read_tokens: raw_cache_read_tokens.saturating_add(compatible_cached_tokens),
+        cache_read_tokens: normalized_cache_read_tokens,
         cache_creation_tokens,
         total_tokens: token_u64(tokens_object, "total_tokens"),
     };
-    if tokens.total_tokens == 0 {
+
+    let provider_lower = provider.to_ascii_lowercase();
+    let is_claude_executor = executor_type.eq_ignore_ascii_case("ClaudeExecutor")
+        || provider_lower == "claude"
+        || provider_lower.contains("anthropic");
+    let cache_components = tokens
+        .cache_read_tokens
+        .saturating_add(tokens.cache_creation_tokens);
+    let raw_total_without_cache = raw_input_tokens.saturating_add(tokens.output_tokens);
+    let raw_total_with_cache = raw_total_without_cache.saturating_add(cache_components);
+    let claude_excludes_cache = is_claude_executor
+        && cache_components > 0
+        && (raw_input_tokens < cache_components || tokens.total_tokens == raw_total_with_cache);
+    if claude_excludes_cache {
+        tokens.input_tokens = raw_input_tokens
+            .saturating_add(tokens.cache_read_tokens)
+            .saturating_add(tokens.cache_creation_tokens);
+    }
+    let input_before_invariant = tokens.input_tokens;
+    if cache_components > input_before_invariant {
+        tokens.input_tokens = input_before_invariant.saturating_add(cache_components);
+        if tokens.total_tokens == 0
+            || tokens.total_tokens == input_before_invariant.saturating_add(tokens.output_tokens)
+        {
+            tokens.total_tokens = tokens.input_tokens.saturating_add(tokens.output_tokens);
+        }
+    }
+    if tokens.total_tokens == 0
+        || (claude_excludes_cache && tokens.total_tokens == raw_total_without_cache)
+    {
         tokens.total_tokens = tokens.input_tokens.saturating_add(tokens.output_tokens);
     }
     let mut canonical = object.clone();
@@ -1670,18 +2156,19 @@ fn normalize_usage_record(value: Value, config: &GuiConfigFile) -> Result<UsageR
     } else {
         request_id.clone()
     };
-    let provider = string_field(object, "provider").unwrap_or_default();
     let endpoint = string_field(object, "endpoint").unwrap_or_default();
-    let executor_type = string_field(object, "executor_type").unwrap_or_default();
+    let failed = object
+        .get("failed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let (failure_status, failure_body) = usage_failure_details(object);
+    let canceled = failed && usage_failure_is_canceled(failure_status, &failure_body);
     let generate = object
         .get("generate")
         .and_then(Value::as_bool)
         .unwrap_or_else(|| {
             !(executor_type == "CodexWebsocketsExecutor"
-                && !object
-                    .get("failed")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
+                && !failed
                 && tokens.input_tokens == 0
                 && tokens.output_tokens == 0
                 && tokens.reasoning_tokens == 0
@@ -1708,10 +2195,10 @@ fn normalize_usage_record(value: Value, config: &GuiConfigFile) -> Result<UsageR
         source: string_field(object, "source").unwrap_or_default(),
         source_display: String::new(),
         auth_index: string_field(object, "auth_index").unwrap_or_default(),
-        failed: object
-            .get("failed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        failed,
+        canceled,
+        failure_status,
+        failure_body,
         provider,
         api_group_key,
         model: string_field(object, "model").unwrap_or_else(|| "unknown".to_string()),
@@ -1738,6 +2225,46 @@ fn normalize_usage_record(value: Value, config: &GuiConfigFile) -> Result<UsageR
         collector_source: "http_pull".to_string(),
         tokens,
     })
+}
+
+fn usage_failure_body(value: &Value) -> String {
+    let body = match value {
+        Value::String(value) => value.trim().to_string(),
+        Value::Null => String::new(),
+        value => serde_json::to_string(value).unwrap_or_default(),
+    };
+    if body.chars().count() <= MAX_USAGE_FAILURE_BODY_CHARS {
+        body
+    } else {
+        let mut bounded = body
+            .chars()
+            .take(MAX_USAGE_FAILURE_BODY_CHARS)
+            .collect::<String>();
+        bounded.push('…');
+        bounded
+    }
+}
+
+fn usage_failure_details(object: &serde_json::Map<String, Value>) -> (u16, String) {
+    let failure = object.get("fail").and_then(Value::as_object);
+    let status = failure
+        .and_then(|value| value.get("status_code").or_else(|| value.get("statusCode")))
+        .and_then(Value::as_u64)
+        .unwrap_or_default()
+        .min(u16::MAX as u64) as u16;
+    let body = failure
+        .and_then(|value| value.get("body"))
+        .map(usage_failure_body)
+        .unwrap_or_default();
+    (status, body)
+}
+
+fn usage_failure_is_canceled(status: u16, body: &str) -> bool {
+    if status == 499 {
+        return true;
+    }
+    let body = body.to_ascii_lowercase();
+    body.contains("context canceled") || body.contains("client closed request")
 }
 
 fn default_usage_generate() -> bool {
@@ -1769,9 +2296,16 @@ fn build_usage_filter(query: &UsageQuery) -> UsageSqlFilter {
         "api_key_hash",
         query.api_key_hash.as_deref(),
     );
+    if let Some(canceled) = query.canceled {
+        clauses.push("canceled = ?".to_string());
+        params.push(SqlValue::Integer(i64::from(canceled)));
+    }
     if let Some(failed) = query.failed {
-        clauses.push("failed = ?".to_string());
-        params.push(SqlValue::Integer(i64::from(failed)));
+        if failed {
+            clauses.push("failed != 0 AND canceled = 0".to_string());
+        } else {
+            clauses.push("failed = 0".to_string());
+        }
     }
     UsageSqlFilter {
         clause: if clauses.is_empty() {
@@ -1818,7 +2352,8 @@ fn load_usage_overview(
         SELECT
             COUNT(*),
             COALESCE(SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN failed != 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN failed != 0 AND canceled = 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN canceled != 0 THEN 1 ELSE 0 END), 0),
             COALESCE(SUM(input_tokens), 0),
             COALESCE(SUM(output_tokens), 0),
             COALESCE(SUM(reasoning_tokens), 0),
@@ -1826,10 +2361,42 @@ fn load_usage_overview(
             COALESCE(SUM(cache_creation_tokens), 0),
             COALESCE(SUM(total_tokens), 0),
             COALESCE(SUM(latency_ms), 0),
-            COALESCE(AVG(CASE
-                WHEN output_tokens > 0 AND latency_ms > 0
-                THEN CAST(output_tokens AS REAL) * 1000.0 / latency_ms
-            END), 0.0),
+            COALESCE(
+                SUM(CASE
+                    WHEN generate != 0
+                     AND failed = 0
+                     AND canceled = 0
+                     AND output_tokens > 0
+                     AND ttft_ms IS NOT NULL
+                     AND ttft_ms > 0
+                     AND latency_ms > ttft_ms
+                    THEN output_tokens
+                    ELSE 0
+                END) * 1000.0
+                / NULLIF(SUM(CASE
+                    WHEN generate != 0
+                     AND failed = 0
+                     AND canceled = 0
+                     AND output_tokens > 0
+                     AND ttft_ms IS NOT NULL
+                     AND ttft_ms > 0
+                     AND latency_ms > ttft_ms
+                    THEN latency_ms - ttft_ms
+                    ELSE 0
+                END), 0),
+                0.0
+            ),
+            COALESCE(SUM(CASE
+                WHEN generate != 0
+                 AND failed = 0
+                 AND canceled = 0
+                 AND output_tokens > 0
+                 AND ttft_ms IS NOT NULL
+                 AND ttft_ms > 0
+                 AND latency_ms > ttft_ms
+                THEN 1
+                ELSE 0
+            END), 0),
             MIN(timestamp_ms),
             MAX(timestamp_ms)
         FROM usage_events{}
@@ -1852,9 +2419,11 @@ fn load_usage_overview(
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, i64>(9)?,
-                    row.get::<_, f64>(10)?,
-                    row.get::<_, Option<i64>>(11)?,
-                    row.get::<_, Option<i64>>(12)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, f64>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, Option<i64>>(13)?,
+                    row.get::<_, Option<i64>>(14)?,
                 ))
             },
         )
@@ -1868,7 +2437,8 @@ fn load_usage_overview(
             local_hour,
             COUNT(*),
             COALESCE(SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN failed != 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN failed != 0 AND canceled = 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN canceled != 0 THEN 1 ELSE 0 END), 0),
             COALESCE(SUM(total_tokens), 0)
         FROM usage_events{}
         GROUP BY local_hour
@@ -1886,7 +2456,8 @@ fn load_usage_overview(
                 requests: from_sql_i64(row.get(1)?),
                 success: from_sql_i64(row.get(2)?),
                 failure: from_sql_i64(row.get(3)?),
-                tokens: from_sql_i64(row.get(4)?),
+                canceled: from_sql_i64(row.get(4)?),
+                tokens: from_sql_i64(row.get(5)?),
             })
         })
         .map_err(|error| format!("查询 SQLite 使用趋势失败: {error}"))?
@@ -1897,28 +2468,35 @@ fn load_usage_overview(
         total_requests: from_sql_i64(summary.0),
         success_count: from_sql_i64(summary.1),
         failure_count: from_sql_i64(summary.2),
-        input_tokens: from_sql_i64(summary.3),
-        output_tokens: from_sql_i64(summary.4),
-        reasoning_tokens: from_sql_i64(summary.5),
-        cache_read_tokens: from_sql_i64(summary.6),
-        cache_creation_tokens: from_sql_i64(summary.7),
-        total_tokens: from_sql_i64(summary.8),
+        canceled_count: from_sql_i64(summary.3),
+        input_tokens: from_sql_i64(summary.4),
+        output_tokens: from_sql_i64(summary.5),
+        reasoning_tokens: from_sql_i64(summary.6),
+        cache_read_tokens: from_sql_i64(summary.7),
+        cache_creation_tokens: from_sql_i64(summary.8),
+        total_tokens: from_sql_i64(summary.9),
         estimated_cost,
         priced_requests,
         timeline,
         ..UsageOverview::default()
     };
     if overview.total_requests > 0 {
-        overview.success_rate =
-            overview.success_count as f64 * 100.0 / overview.total_requests as f64;
+        let completed_requests = overview
+            .success_count
+            .saturating_add(overview.failure_count);
+        if completed_requests > 0 {
+            overview.success_rate =
+                overview.success_count as f64 * 100.0 / completed_requests as f64;
+        }
         overview.average_latency_ms =
-            from_sql_i64(summary.9) as f64 / overview.total_requests as f64;
-        overview.tps = summary.10;
+            from_sql_i64(summary.10) as f64 / overview.total_requests as f64;
+        overview.tps = summary.11;
+        overview.tps_sample_count = from_sql_i64(summary.12);
         if overview.input_tokens > 0 {
             overview.cache_hit_rate =
                 (overview.cache_read_tokens as f64 / overview.input_tokens as f64).min(1.0);
         }
-        let minutes = query_window_minutes(query, summary.11, summary.12);
+        let minutes = query_window_minutes(query, summary.13, summary.14);
         overview.rpm = overview.total_requests as f64 / minutes;
         overview.tpm = overview.total_tokens as f64 / minutes;
     }
@@ -2586,7 +3164,7 @@ fn load_simple_categories(
         SELECT
             COALESCE(NULLIF(TRIM({column}), ''), ?),
             COUNT(*),
-            COALESCE(SUM(CASE WHEN failed != 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN failed != 0 AND canceled = 0 THEN 1 ELSE 0 END), 0),
             COALESCE(SUM(total_tokens), 0)
         FROM usage_events{}
         GROUP BY 1
@@ -2629,7 +3207,7 @@ fn load_api_key_categories(
             MAX(TRIM(api_key_remark)),
             MAX(TRIM(api_key_display)),
             COUNT(*),
-            COALESCE(SUM(CASE WHEN failed != 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN failed != 0 AND canceled = 0 THEN 1 ELSE 0 END), 0),
             COALESCE(SUM(total_tokens), 0)
         FROM usage_events{}
         GROUP BY 1
@@ -2699,7 +3277,8 @@ fn load_usage_events(
             api_group_key, client_ip, x_forwarded_for, user_agent, generate,
             cached_tokens, collector_source,
             input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
-            cache_creation_tokens, total_tokens
+            cache_creation_tokens, total_tokens, canceled, failure_status,
+            failure_body
         FROM usage_events{}
         ORDER BY timestamp_ms DESC, id DESC
         LIMIT ? OFFSET ?
@@ -2739,6 +3318,9 @@ fn usage_record_from_row(row: &Row<'_>) -> rusqlite::Result<UsageRecord> {
         source_display: String::new(),
         auth_index: row.get(5)?,
         failed: row.get::<_, i64>(6)? != 0,
+        canceled: row.get::<_, i64>(33)? != 0,
+        failure_status: row.get::<_, i64>(34)?.clamp(0, u16::MAX as i64) as u16,
+        failure_body: row.get(35)?,
         provider: row.get(7)?,
         api_group_key: row.get(20)?,
         model: row.get(8)?,
@@ -2983,6 +3565,55 @@ mod tests {
         open_usage_database_at(root).unwrap()
     }
 
+    #[test]
+    fn repairs_legacy_claude_input_tokens_on_demand() {
+        let root = test_root("claude-input-migration");
+        let connection = open_test_database(&root);
+        connection
+            .execute(
+                r#"INSERT INTO usage_events (
+                    event_key, timestamp, timestamp_ms, local_hour, provider,
+                    executor_type, input_tokens, output_tokens, cache_read_tokens,
+                    cache_creation_tokens, total_tokens, created_at
+                ) VALUES ('legacy-claude', '2026-08-27T00:00:00Z', 1,
+                          '2026-08-27T00', 'claude', 'ClaudeExecutor',
+                          100, 20, 600, 20, 740, '2026-08-27T00:00:00Z')"#,
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let result = repair_usage_cache_records_at(&root).unwrap();
+        assert_eq!(result.scanned, 1);
+        assert_eq!(result.repaired, 1);
+        assert!(result.backup_path.is_some());
+        let connection = open_usage_database_at(&root).unwrap();
+        let row: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT input_tokens, total_tokens, cached_tokens FROM usage_events WHERE event_key = 'legacy-claude'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (720, 740, 620));
+        drop(connection);
+
+        let second = repair_usage_cache_records_at(&root).unwrap();
+        assert_eq!(second.scanned, 0);
+        assert_eq!(second.repaired, 0);
+        let rerun_connection = open_usage_database_at(&root).unwrap();
+        let rerun_input: i64 = rerun_connection
+            .query_row(
+                "SELECT input_tokens FROM usage_events WHERE event_key = 'legacy-claude'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(rerun_connection);
+        assert_eq!(rerun_input, 720);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn create_legacy_v2_database(root: &Path) -> Connection {
         fs::create_dir_all(root).unwrap();
         let connection = Connection::open(root.join(USAGE_DATABASE_FILE)).unwrap();
@@ -3042,6 +3673,9 @@ mod tests {
             source_display: String::new(),
             auth_index: "auth".to_string(),
             failed: false,
+            canceled: false,
+            failure_status: 0,
+            failure_body: String::new(),
             provider: "openai".to_string(),
             api_group_key: "hash".to_string(),
             model: model.to_string(),
@@ -3129,6 +3763,7 @@ mod tests {
             start_core_on_launch: true,
             silent_start: false,
             close_behavior: crate::WindowsCloseBehavior::Ask,
+            default_terminal: crate::DEFAULT_AGENT_TERMINAL.to_string(),
             window_width: None,
             window_height: None,
             auth_dir: String::new(),
@@ -3139,6 +3774,10 @@ mod tests {
             plugins_enabled: false,
             routing_strategy: "round-robin".to_string(),
             proxy_url: String::new(),
+            download_source: VersionDownloadSource::Github,
+            custom_download_mirrors: Vec::new(),
+            active_custom_download_mirror: String::new(),
+            prefer_gitcode_downloads: false,
             routing_session_affinity: false,
             routing_session_affinity_ttl: String::new(),
             request_retry: crate::DEFAULT_REQUEST_RETRY,
@@ -3171,6 +3810,107 @@ mod tests {
         assert_eq!(record.tokens.total_tokens, 30);
         assert_eq!(record.tokens.cache_read_tokens, 5);
         assert!(!record.api_key_hash.is_empty());
+    }
+
+    #[test]
+    fn preserves_explicit_cache_read_and_only_backfills_missing_alias() {
+        let config = GuiConfigFile::default();
+        let explicit = normalize_usage_record(
+            serde_json::json!({
+                "request_id": "explicit-cache-read",
+                "tokens": {
+                    "input_tokens": 100,
+                    "cached_tokens": 10,
+                    "cache_read_tokens": 5,
+                    "cache_creation_tokens": 2,
+                    "total_tokens": 100
+                }
+            }),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(explicit.tokens.cache_read_tokens, 5);
+
+        let legacy = normalize_usage_record(
+            serde_json::json!({
+                "request_id": "legacy-cache-alias",
+                "tokens": {
+                    "input_tokens": 100,
+                    "cached_tokens": 10,
+                    "cache_creation_tokens": 2,
+                    "total_tokens": 100
+                }
+            }),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(legacy.tokens.cache_read_tokens, 10);
+    }
+
+    #[test]
+    fn normalizes_claude_input_to_include_cache_tokens() {
+        let record = normalize_usage_record(
+            serde_json::json!({
+                "executor_type": "ClaudeExecutor",
+                "provider": "anthropic",
+                "request_id": "claude-cache-rate",
+                "tokens": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_tokens": 600,
+                    "cache_creation_tokens": 20,
+                    "total_tokens": 120
+                }
+            }),
+            &GuiConfigFile::default(),
+        )
+        .unwrap();
+
+        assert_eq!(record.tokens.input_tokens, 720);
+        assert_eq!(record.tokens.total_tokens, 740);
+        assert_eq!(record.tokens.cache_read_tokens, 600);
+    }
+
+    #[test]
+    fn keeps_already_inclusive_claude_input_unchanged() {
+        let record = normalize_usage_record(
+            serde_json::json!({
+                "provider": "anthropic",
+                "request_id": "claude-inclusive",
+                "tokens": {
+                    "input_tokens": 720,
+                    "output_tokens": 20,
+                    "cache_read_tokens": 600,
+                    "cache_creation_tokens": 20,
+                    "total_tokens": 740
+                }
+            }),
+            &GuiConfigFile::default(),
+        )
+        .unwrap();
+        assert_eq!(record.tokens.input_tokens, 720);
+        assert_eq!(record.tokens.total_tokens, 740);
+    }
+
+    #[test]
+    fn enforces_cache_input_invariant_for_unknown_producers() {
+        let record = normalize_usage_record(
+            serde_json::json!({
+                "provider": "custom",
+                "request_id": "unknown-cache-shape",
+                "tokens": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_tokens": 600,
+                    "total_tokens": 120
+                }
+            }),
+            &GuiConfigFile::default(),
+        )
+        .unwrap();
+        assert_eq!(record.tokens.input_tokens, 700);
+        assert_eq!(record.tokens.total_tokens, 720);
+        assert!(record.tokens.cache_read_tokens <= record.tokens.input_tokens);
     }
 
     #[test]
@@ -3234,6 +3974,85 @@ mod tests {
             .items
             .iter()
             .any(|event| event.request_id == "websocket-zero-token"));
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persists_failure_details_and_excludes_client_cancellations_from_failures() {
+        let root = test_root("usage-failure-details");
+        initialize_usage_storage_at(&root).unwrap();
+        let config = GuiConfigFile::default();
+        persist_queue_items(
+            &root,
+            vec![
+                serde_json::json!({
+                    "timestamp": "2026-07-29T10:00:00+08:00",
+                    "request_id": "success",
+                    "failed": false,
+                    "provider": "antigravity",
+                    "model": "gemini-test"
+                }),
+                serde_json::json!({
+                    "timestamp": "2026-07-29T10:00:01+08:00",
+                    "request_id": "upstream-failure",
+                    "failed": true,
+                    "provider": "antigravity",
+                    "model": "gemini-test",
+                    "fail": {
+                        "status_code": 429,
+                        "body": { "error": { "message": "quota exhausted" } }
+                    }
+                }),
+                serde_json::json!({
+                    "timestamp": "2026-07-29T10:00:02+08:00",
+                    "request_id": "client-canceled",
+                    "failed": true,
+                    "provider": "antigravity",
+                    "model": "gemini-test",
+                    "fail": {
+                        "status_code": 499,
+                        "body": "context canceled"
+                    }
+                }),
+            ],
+            &config,
+        )
+        .unwrap();
+
+        let connection = open_usage_database_at(&root).unwrap();
+        let overview = load_usage_overview(&connection, &UsageQuery::default()).unwrap();
+        let failures = load_usage_events(
+            &connection,
+            &UsageQuery {
+                failed: Some(true),
+                ..UsageQuery::default()
+            },
+            &config,
+        )
+        .unwrap();
+        let cancellations = load_usage_events(
+            &connection,
+            &UsageQuery {
+                canceled: Some(true),
+                ..UsageQuery::default()
+            },
+            &config,
+        )
+        .unwrap();
+
+        assert_eq!(overview.total_requests, 3);
+        assert_eq!(overview.success_count, 1);
+        assert_eq!(overview.failure_count, 1);
+        assert_eq!(overview.canceled_count, 1);
+        assert_eq!(overview.success_rate, 50.0);
+        assert_eq!(failures.total, 1);
+        assert_eq!(failures.items[0].request_id, "upstream-failure");
+        assert_eq!(failures.items[0].failure_status, 429);
+        assert!(failures.items[0].failure_body.contains("quota exhausted"));
+        assert_eq!(cancellations.total, 1);
+        assert_eq!(cancellations.items[0].request_id, "client-canceled");
+        assert!(cancellations.items[0].canceled);
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
@@ -3335,6 +4154,109 @@ mod tests {
         assert_eq!(migrated.5, "legacy_migration");
         assert!(!marker.is_empty());
         assert_eq!(backups.len(), 1);
+
+        let duplicate_inserted = connection
+            .execute(
+                r#"
+                INSERT INTO usage_events (
+                    event_key, timestamp, timestamp_ms, local_hour, created_at
+                ) VALUES (
+                    'request-1', '2026-07-17T20:31:00+08:00', 1784291460000,
+                    '2026-07-17-20', '2026-07-17T20:31:01+08:00'
+                )
+                "#,
+                [],
+            )
+            .unwrap();
+        assert_eq!(duplicate_inserted, 1);
+        let duplicate_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE event_key = 'request-1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(duplicate_count, 2);
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failure_detail_migration_backfills_processed_inbox_rows_once() {
+        let root = test_root("failure-detail-v4-migration");
+        let mut connection = open_test_database(&root);
+        let mut record = sample_record(
+            "legacy-canceled",
+            "2026-07-17T20:30:00+08:00",
+            "gemini-test",
+        );
+        record.failed = true;
+        insert_usage_records(&mut connection, &[record]).unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO usage_inbox (
+                    source, message_hash, raw_message, status, attempt_count,
+                    usage_event_key, received_at, processed_at, created_at, updated_at
+                ) VALUES (
+                    'test', 'legacy-canceled-hash', ?1, 'processed', 1,
+                    'legacy-canceled', ?2, ?2, ?2, ?2
+                )
+                "#,
+                params![
+                    serde_json::json!({
+                        "request_id": "legacy-canceled",
+                        "failed": true,
+                        "fail": {
+                            "status_code": 499,
+                            "body": "client closed request"
+                        }
+                    })
+                    .to_string(),
+                    Local::now().to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "DELETE FROM usage_metadata WHERE key = ?1",
+                params![USAGE_FAILURE_MIGRATION_KEY],
+            )
+            .unwrap();
+        drop(connection);
+
+        initialize_usage_storage_at(&root).unwrap();
+        initialize_usage_storage_at(&root).unwrap();
+        let connection = open_usage_database_at(&root).unwrap();
+        let migrated = connection
+            .query_row(
+                r#"
+                SELECT canceled, failure_status, failure_body
+                FROM usage_events
+                WHERE event_key = 'legacy-canceled'
+                "#,
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let markers = connection
+            .query_row(
+                "SELECT COUNT(*) FROM usage_metadata WHERE key = ?1",
+                params![USAGE_FAILURE_MIGRATION_KEY],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+
+        assert_eq!(migrated.0, 1);
+        assert_eq!(migrated.1, 499);
+        assert_eq!(migrated.2, "client closed request");
+        assert_eq!(markers, 1);
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
@@ -3386,6 +4308,76 @@ mod tests {
         assert_eq!(event_count, 1);
         assert_eq!(processed_count, 1);
         assert_eq!(failed_count, 1);
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn durable_inbox_preserves_multiple_events_with_same_request_id() {
+        let root = test_root("durable-inbox-duplicate-request-id");
+        initialize_usage_storage_at(&root).unwrap();
+        let mut connection = open_usage_database_at(&root).unwrap();
+        enqueue_usage_queue_items(
+            &mut connection,
+            "redis_subscribe:usage",
+            vec![
+                serde_json::json!({
+                    "timestamp": "2026-07-17T20:30:00+08:00",
+                    "request_id": "persistent-connection",
+                    "model": "gpt-first",
+                    "tokens": { "input_tokens": 10, "output_tokens": 20, "total_tokens": 30 }
+                }),
+                serde_json::json!({
+                    "timestamp": "2026-07-17T20:31:00+08:00",
+                    "request_id": "persistent-connection",
+                    "model": "gpt-second",
+                    "tokens": { "input_tokens": 30, "output_tokens": 40, "total_tokens": 70 }
+                }),
+            ],
+        )
+        .unwrap();
+
+        let inserted = process_usage_inbox(&mut connection, &GuiConfigFile::default()).unwrap();
+        assert_eq!(inserted, 2);
+        let event_count = connection
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(event_count, 2);
+
+        let rows = {
+            let mut statement = connection
+                .prepare("SELECT event_key, model, total_tokens FROM usage_events ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "persistent-connection".to_string(),
+                    "gpt-first".to_string(),
+                    30
+                ),
+                (
+                    "persistent-connection".to_string(),
+                    "gpt-second".to_string(),
+                    70
+                ),
+            ]
+        );
+
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
@@ -3447,23 +4439,99 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_storage_deduplicates_event_keys_transactionally() {
-        let root = test_root("sqlite-deduplicate");
+    fn sqlite_storage_preserves_duplicate_event_keys_transactionally() {
+        let root = test_root("sqlite-duplicate-event-keys");
         let mut connection = open_test_database(&root);
-        let record = sample_record("request-1", "2026-07-17T20:30:00+08:00", "gpt-test");
+        let first = sample_record("request-1", "2026-07-17T20:30:00+08:00", "gpt-test");
+        let second = sample_record("request-1", "2026-07-17T20:31:00+08:00", "gpt-test-updated");
 
         assert_eq!(
-            insert_usage_records(&mut connection, std::slice::from_ref(&record)).unwrap(),
+            insert_usage_records(&mut connection, std::slice::from_ref(&first)).unwrap(),
             1
         );
-        assert_eq!(insert_usage_records(&mut connection, &[record]).unwrap(), 0);
+        assert_eq!(insert_usage_records(&mut connection, &[second]).unwrap(), 1);
         let count = connection
             .query_row("SELECT COUNT(*) FROM usage_events", [], |row| {
                 row.get::<_, i64>(0)
             })
             .unwrap();
 
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_v3_database_migrates_unique_event_key_without_losing_rows() {
+        let root = test_root("event-key-v5-migration");
+        let mut connection = open_test_database(&root);
+        let table_sql = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'usage_events'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let indexes = {
+            let mut statement = connection
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'usage_events'")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        for index in indexes {
+            connection
+                .execute(
+                    &format!("DROP INDEX {}", quote_sqlite_identifier(&index)),
+                    [],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "ALTER TABLE usage_events RENAME TO usage_events_previous",
+                [],
+            )
+            .unwrap();
+        let unique_table_sql = replace_sql_fragment_case_insensitive(
+            &table_sql,
+            "event_key TEXT NOT NULL,",
+            "event_key TEXT NOT NULL UNIQUE,",
+        )
+        .unwrap();
+        connection.execute_batch(&unique_table_sql).unwrap();
+        connection
+            .execute("DROP TABLE usage_events_previous", [])
+            .unwrap();
+
+        migrate_usage_database(&mut connection, &root).unwrap();
+        connection
+            .execute(
+                "INSERT INTO usage_events (event_key, timestamp, timestamp_ms, local_hour, created_at) VALUES ('persistent', '2026-07-17T20:30:00+08:00', 1, '2026-07-17-20', '2026-07-17T20:30:00+08:00'), ('persistent', '2026-07-17T20:31:00+08:00', 2, '2026-07-17-20', '2026-07-17T20:31:00+08:00')",
+                [],
+            )
+            .unwrap();
+        let count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE event_key = 'persistent'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM usage_metadata WHERE key = ?1",
+                    params![USAGE_EVENT_KEY_MIGRATION_KEY],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
@@ -3542,13 +4610,73 @@ mod tests {
 
         assert_eq!(overview.total_requests, 1);
         assert_eq!(overview.failure_count, 1);
-        assert_eq!(overview.tps, 200.0);
+        assert_eq!(overview.tps, 0.0);
+        assert_eq!(overview.tps_sample_count, 0);
         assert_eq!(overview.cache_hit_rate, 0.2);
         assert!((overview.estimated_cost - 0.00021794).abs() < 0.0000001);
         assert_eq!(overview.priced_requests, 1);
         assert_eq!(analysis.models[0].key, "gpt-5.6-terra");
         assert_eq!(events.total, 1);
         assert_eq!(events.items[0].id, "request-2");
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn overview_tps_uses_weighted_generation_time_and_ignores_invalid_records() {
+        let root = test_root("tps-overview");
+        let mut connection = open_test_database(&root);
+
+        let mut first = sample_record("tps-1", "2026-07-17T20:30:00+08:00", "gpt-a");
+        first.latency_ms = 1_000;
+        first.ttft_ms = Some(200);
+        first.tokens.output_tokens = 80;
+
+        let mut second = sample_record("tps-2", "2026-07-17T20:31:00+08:00", "gpt-a");
+        second.latency_ms = 2_000;
+        second.ttft_ms = Some(1_000);
+        second.tokens.output_tokens = 20;
+
+        let mut missing_ttft = sample_record("tps-3", "2026-07-17T20:32:00+08:00", "gpt-a");
+        missing_ttft.latency_ms = 500;
+        missing_ttft.ttft_ms = None;
+        missing_ttft.tokens.output_tokens = 100;
+
+        let mut equal_latency = sample_record("tps-4", "2026-07-17T20:33:00+08:00", "gpt-a");
+        equal_latency.latency_ms = 500;
+        equal_latency.ttft_ms = Some(500);
+        equal_latency.tokens.output_tokens = 100;
+
+        let mut failed = sample_record("tps-5", "2026-07-17T20:34:00+08:00", "gpt-a");
+        failed.failed = true;
+        failed.tokens.output_tokens = 100;
+
+        let mut canceled = sample_record("tps-6", "2026-07-17T20:35:00+08:00", "gpt-a");
+        canceled.canceled = true;
+        canceled.tokens.output_tokens = 100;
+
+        let mut non_generation = sample_record("tps-7", "2026-07-17T20:36:00+08:00", "gpt-a");
+        non_generation.generate = false;
+        non_generation.tokens.output_tokens = 100;
+
+        insert_usage_records(
+            &mut connection,
+            &[
+                first,
+                second,
+                missing_ttft,
+                equal_latency,
+                failed,
+                canceled,
+                non_generation,
+            ],
+        )
+        .unwrap();
+
+        let overview = load_usage_overview(&connection, &UsageQuery::default()).unwrap();
+
+        assert!((overview.tps - (100.0 * 1_000.0 / 1_800.0)).abs() < f64::EPSILON);
+        assert_eq!(overview.tps_sample_count, 2);
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }

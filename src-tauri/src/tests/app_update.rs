@@ -202,6 +202,114 @@ fn portable_update_asset_accepts_only_the_configured_gitcode_fallback() {
 }
 
 #[test]
+fn portable_update_download_order_respects_gitcode_preference() {
+    let mut asset = portable_update_test_asset("1.2.3", "amd64");
+    let (_, display, suffix) = portable_update_asset_platform().unwrap();
+    let filename = format!("EasyCLIProxyAPI-v1.2.3-{display}-amd64.{suffix}");
+    asset.fallback_urls = vec![gitcode_release_attachment_url(
+        "mirror-owner/EasyCLIProxyAPI",
+        "v1.2.3",
+        &filename,
+    )];
+
+    let github_first = portable_update_download_urls(
+        &asset,
+        &VersionDownloadCandidate::builtin(VersionDownloadSource::Github),
+    );
+    assert_eq!(update_download_source_name(&github_first[0]), "GitHub");
+    assert_eq!(update_download_source_name(&github_first[1]), "GitCode");
+
+    let gitcode_first = portable_update_download_urls(
+        &asset,
+        &VersionDownloadCandidate::builtin(VersionDownloadSource::Gitcode),
+    );
+    assert_eq!(update_download_source_name(&gitcode_first[0]), "GitCode");
+    assert_eq!(update_download_source_name(&gitcode_first[1]), "GitHub");
+
+    let mirror_first = portable_update_download_urls(
+        &asset,
+        &VersionDownloadCandidate::builtin(VersionDownloadSource::GhProxy),
+    );
+    assert_eq!(
+        update_download_source_name(&mirror_first[0]),
+        "gh-proxy.com"
+    );
+    assert_eq!(update_download_source_name(&mirror_first[1]), "GitHub");
+    assert_eq!(update_download_source_name(&mirror_first[2]), "GitCode");
+}
+
+#[test]
+fn version_detection_candidates_try_every_available_source_once() {
+    assert_eq!(
+        version_download_source_candidates(
+            VersionDownloadCandidate::builtin(VersionDownloadSource::GhFast),
+            true,
+            &[],
+        ),
+        [
+            VersionDownloadCandidate::builtin(VersionDownloadSource::GhFast),
+            VersionDownloadCandidate::builtin(VersionDownloadSource::Github),
+            VersionDownloadCandidate::builtin(VersionDownloadSource::Gitcode),
+            VersionDownloadCandidate::builtin(VersionDownloadSource::GhProxy),
+        ]
+    );
+    assert_eq!(
+        version_download_source_candidates(
+            VersionDownloadCandidate::builtin(VersionDownloadSource::Gitcode),
+            false,
+            &[],
+        ),
+        [
+            VersionDownloadCandidate::builtin(VersionDownloadSource::Github),
+            VersionDownloadCandidate::builtin(VersionDownloadSource::GhProxy),
+            VersionDownloadCandidate::builtin(VersionDownloadSource::GhFast),
+        ]
+    );
+}
+
+#[test]
+fn custom_mirror_urls_are_normalized_and_join_the_fallback_chain() {
+    assert_eq!(
+        normalize_custom_download_mirror_url(" https://mirror.example.com/base ").unwrap(),
+        "https://mirror.example.com/base/"
+    );
+    assert!(normalize_custom_download_mirror_url("http://mirror.example.com/").is_err());
+    assert!(normalize_custom_download_mirror_url("https://mirror.example.com/?token=x").is_err());
+
+    let mirrors = vec![
+        "https://first.example.com/".to_string(),
+        "https://second.example.com/".to_string(),
+    ];
+    let candidates = version_download_source_candidates(
+        VersionDownloadCandidate::custom(&mirrors[1]),
+        true,
+        &mirrors,
+    );
+    assert_eq!(candidates[0], VersionDownloadCandidate::custom(&mirrors[1]));
+    assert_eq!(
+        candidates.last(),
+        Some(&VersionDownloadCandidate::custom(&mirrors[0]))
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|candidate| candidate.custom_url.is_some())
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn custom_mirror_is_used_for_portable_update_downloads() {
+    let asset = portable_update_test_asset("1.2.3", "amd64");
+    let source = VersionDownloadCandidate::custom("https://mirror.example.com/");
+    let urls = portable_update_download_urls(&asset, &source);
+    assert!(urls[0].starts_with("https://mirror.example.com/https://github.com/"));
+    assert_eq!(update_download_source_name(&urls[0]), "mirror.example.com");
+    assert_eq!(update_download_source_name(&urls[1]), "GitHub");
+}
+
+#[test]
 fn portable_update_state_supports_cancellation_and_snapshot_recovery() {
     let state = AppUpdateState::default();
     let pending = PendingAppUpdate {
@@ -572,7 +680,11 @@ fn synthetic_release_uses_official_asset_names_and_urls() {
 #[test]
 fn synthetic_core_release_uses_gitcode_as_download_fallback() {
     let repository = "lzt404/CLIProxyAPI";
-    let release = release_from_tag_for_repositories("7.2.80", Some(repository), false);
+    let release = release_from_tag_for_repositories(
+        "7.2.80",
+        Some(repository),
+        &VersionDownloadCandidate::builtin(VersionDownloadSource::Github),
+    );
     let platform = CorePlatform {
         os: "windows".to_string(),
         arch: "x86_64".to_string(),
@@ -608,7 +720,40 @@ fn gitcode_discovered_core_release_downloads_from_gitcode_first() {
             asset.browser_download_url,
             "https://api.gitcode.com/api/v5/repos/lzt404/CLIProxyAPI/releases/v7.2.80/attach_files/CLIProxyAPI_7.2.80_linux_aarch64.tar.gz/download"
         );
-    assert!(asset.fallback_download_urls.is_empty());
+    assert_eq!(
+        asset.fallback_download_urls,
+        ["https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.80/CLIProxyAPI_7.2.80_linux_aarch64.tar.gz"]
+    );
+}
+
+#[test]
+fn github_proxy_core_release_uses_proxy_then_official_and_gitcode() {
+    let release = release_from_tag_for_repositories(
+        "v7.2.80",
+        Some("lzt404/CLIProxyAPI"),
+        &VersionDownloadCandidate::builtin(VersionDownloadSource::GhFast),
+    );
+    let platform = CorePlatform {
+        os: "windows".to_string(),
+        arch: "x86_64".to_string(),
+        asset_os: "windows".to_string(),
+        asset_arch: "amd64".to_string(),
+        archive_kind: "zip".to_string(),
+    };
+    let asset = select_release_asset(&release, &platform).unwrap();
+
+    assert_eq!(
+        core_download_source_name(&asset.browser_download_url),
+        "ghfast.top"
+    );
+    assert_eq!(
+        core_download_source_name(&asset.fallback_download_urls[0]),
+        "GitHub"
+    );
+    assert_eq!(
+        core_download_source_name(&asset.fallback_download_urls[1]),
+        "GitCode"
+    );
 }
 
 #[test]

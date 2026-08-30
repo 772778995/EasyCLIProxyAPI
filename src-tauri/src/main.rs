@@ -9,6 +9,7 @@ mod codex_sessions;
 mod configuration_watcher;
 mod core_config;
 mod core_runtime;
+mod instance_lock;
 mod management_api;
 mod oauth_browser;
 mod provider_health;
@@ -36,6 +37,7 @@ use core_config::*;
 use core_runtime::*;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
+use instance_lock::*;
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
 #[cfg(target_os = "macos")]
@@ -108,6 +110,8 @@ const PORTABLE_APP_BINARY: &str = "EasyCLIProxyAPI";
 const CORE_INSTALL_PROGRESS_EVENT: &str = "core-install-progress";
 const CORE_STATUS_EVENT: &str = "core-status-changed";
 const CONFIG_FILES_CHANGED_EVENT: &str = "config-files-changed";
+const VERSION_DOWNLOAD_SOURCE_CHANGED_EVENT: &str = "version-download-source-changed";
+static VERSION_SOURCE_DETECTION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[cfg(target_os = "windows")]
 const WINDOWS_CLOSE_REQUEST_EVENT: &str = "windows-close-requested";
 const CORE_METADATA_FILE: &str = "cpa-gui-meta.json";
@@ -120,11 +124,14 @@ const LEGACY_GUI_CONFIG_FILE: &str = "cpa-gui.yaml";
 const MIN_MAIN_WINDOW_WIDTH: u32 = 640;
 const MIN_MAIN_WINDOW_HEIGHT: u32 = 600;
 const MAX_SAVED_WINDOW_DIMENSION: u32 = 16_384;
-const DEFAULT_MAIN_WINDOW_WIDTH: u32 = 1531;
-const DEFAULT_MAIN_WINDOW_HEIGHT: u32 = 891;
+const DEFAULT_MAIN_WINDOW_WIDTH: u32 = 1280;
+const DEFAULT_MAIN_WINDOW_HEIGHT: u32 = 800;
+const LEGACY_DEFAULT_MAIN_WINDOW_WIDTH: u32 = 1531;
+const LEGACY_DEFAULT_MAIN_WINDOW_HEIGHT: u32 = 891;
 const OAUTH_DIR_NAME: &str = "oauth";
 const DEFAULT_AUTH_DIR: &str = "../oauth";
 const DEFAULT_API_KEY: &str = "123456";
+const DEFAULT_AGENT_TERMINAL: &str = "auto";
 const DEFAULT_API_KEY_INITIAL_REMARK: &str = "默认密钥";
 const DEFAULT_REQUEST_RETRY: u32 = 3;
 const DEFAULT_MAX_RETRY_CREDENTIALS: u32 = 0;
@@ -290,9 +297,16 @@ struct AppUpdateInner {
 #[derive(Default)]
 struct CoreProcessState {
     child: Mutex<Option<Child>>,
+    adopted_processes: Mutex<Vec<AdoptedCoreProcess>>,
     starting: AtomicBool,
     #[cfg(windows)]
     job: Mutex<Option<isize>>,
+}
+
+#[derive(Clone)]
+struct AdoptedCoreProcess {
+    process_id: u32,
+    binary_path: PathBuf,
 }
 
 struct GuiConfigState {
@@ -571,6 +585,7 @@ struct GuiConfigFile {
     start_core_on_launch: bool,
     silent_start: bool,
     close_behavior: WindowsCloseBehavior,
+    default_terminal: String,
     window_width: Option<u32>,
     window_height: Option<u32>,
     auth_dir: String,
@@ -582,12 +597,185 @@ struct GuiConfigFile {
     plugins_enabled: bool,
     routing_strategy: String,
     proxy_url: String,
+    download_source: VersionDownloadSource,
+    custom_download_mirrors: Vec<String>,
+    active_custom_download_mirror: String,
+    // Kept for migration compatibility with configurations written before
+    // multi-source downloads were introduced.
+    prefer_gitcode_downloads: bool,
     routing_session_affinity: bool,
     routing_session_affinity_ttl: String,
     request_retry: u32,
     max_retry_credentials: u32,
     max_retry_interval: u32,
     streaming_bootstrap_retries: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum VersionDownloadSource {
+    #[default]
+    Github,
+    Gitcode,
+    GhProxy,
+    GhFast,
+    Custom,
+}
+
+impl VersionDownloadSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Gitcode => "gitcode",
+            Self::GhProxy => "gh-proxy",
+            Self::GhFast => "gh-fast",
+            Self::Custom => "custom",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim() {
+            "github" => Some(Self::Github),
+            "gitcode" => Some(Self::Gitcode),
+            "gh-proxy" => Some(Self::GhProxy),
+            "gh-fast" => Some(Self::GhFast),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Github => "GitHub",
+            Self::Gitcode => "GitCode",
+            Self::GhProxy => "gh-proxy.com",
+            Self::GhFast => "ghfast.top",
+            Self::Custom => "自定义镜像",
+        }
+    }
+
+    fn github_proxy_prefix(self) -> Option<&'static str> {
+        match self {
+            Self::GhProxy => Some("https://gh-proxy.com/"),
+            Self::GhFast => Some("https://ghfast.top/"),
+            Self::Custom => None,
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VersionDownloadCandidate {
+    source: VersionDownloadSource,
+    custom_url: Option<String>,
+}
+
+impl VersionDownloadCandidate {
+    fn builtin(source: VersionDownloadSource) -> Self {
+        Self {
+            source,
+            custom_url: None,
+        }
+    }
+
+    fn custom(url: &str) -> Self {
+        Self {
+            source: VersionDownloadSource::Custom,
+            custom_url: Some(url.to_string()),
+        }
+    }
+
+    fn key(&self) -> String {
+        self.custom_url
+            .as_ref()
+            .map(|url| format!("custom:{url}"))
+            .unwrap_or_else(|| self.source.as_str().to_string())
+    }
+
+    fn display_name(&self) -> String {
+        self.custom_url
+            .as_ref()
+            .and_then(|url| reqwest::Url::parse(url).ok())
+            .and_then(|url| url.host_str().map(str::to_string))
+            .unwrap_or_else(|| self.source.display_name().to_string())
+    }
+
+    fn proxy_prefix(&self) -> Option<&str> {
+        self.custom_url
+            .as_deref()
+            .or_else(|| self.source.github_proxy_prefix())
+    }
+}
+
+fn version_source_url(source: &VersionDownloadCandidate, github_url: &str) -> String {
+    source
+        .proxy_prefix()
+        .map(|prefix| format!("{prefix}{github_url}"))
+        .unwrap_or_else(|| github_url.to_string())
+}
+
+fn version_download_source_candidates(
+    preferred: VersionDownloadCandidate,
+    gitcode_available: bool,
+    custom_mirrors: &[String],
+) -> Vec<VersionDownloadCandidate> {
+    let mut candidates = vec![
+        preferred,
+        VersionDownloadCandidate::builtin(VersionDownloadSource::Github),
+        VersionDownloadCandidate::builtin(VersionDownloadSource::Gitcode),
+        VersionDownloadCandidate::builtin(VersionDownloadSource::GhProxy),
+        VersionDownloadCandidate::builtin(VersionDownloadSource::GhFast),
+    ];
+    candidates.retain(|candidate| {
+        gitcode_available || candidate.source != VersionDownloadSource::Gitcode
+    });
+    candidates.extend(
+        custom_mirrors
+            .iter()
+            .map(|url| VersionDownloadCandidate::custom(url)),
+    );
+    candidates
+        .into_iter()
+        .fold(Vec::new(), |mut sources, source| {
+            if !sources.contains(&source) {
+                sources.push(source);
+            }
+            sources
+        })
+}
+
+fn normalize_custom_download_mirror_url(value: &str) -> Result<String, String> {
+    let mut url =
+        reqwest::Url::parse(value.trim()).map_err(|error| format!("镜像地址无效: {error}"))?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("镜像地址必须是无认证、端口、查询参数和片段的 HTTPS 地址".to_string());
+    }
+    if !url.path().ends_with('/') {
+        let path = format!("{}/", url.path());
+        url.set_path(&path);
+    }
+    Ok(url.to_string())
+}
+
+impl GuiConfigFile {
+    fn selected_download_candidate(&self) -> VersionDownloadCandidate {
+        if self.download_source == VersionDownloadSource::Custom
+            && self
+                .custom_download_mirrors
+                .contains(&self.active_custom_download_mirror)
+        {
+            VersionDownloadCandidate::custom(&self.active_custom_download_mirror)
+        } else {
+            VersionDownloadCandidate::builtin(self.download_source)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -682,6 +870,7 @@ impl Default for GuiConfigFile {
             start_core_on_launch: true,
             silent_start: false,
             close_behavior: WindowsCloseBehavior::Ask,
+            default_terminal: DEFAULT_AGENT_TERMINAL.to_string(),
             window_width: Some(DEFAULT_MAIN_WINDOW_WIDTH),
             window_height: Some(DEFAULT_MAIN_WINDOW_HEIGHT),
             auth_dir: DEFAULT_AUTH_DIR.to_string(),
@@ -694,6 +883,10 @@ impl Default for GuiConfigFile {
             plugins_enabled: false,
             routing_strategy: "round-robin".to_string(),
             proxy_url: String::new(),
+            download_source: VersionDownloadSource::Github,
+            custom_download_mirrors: Vec::new(),
+            active_custom_download_mirror: String::new(),
+            prefer_gitcode_downloads: false,
             routing_session_affinity: false,
             routing_session_affinity_ttl: String::new(),
             request_retry: DEFAULT_REQUEST_RETRY,
@@ -716,12 +909,17 @@ struct GuiConfigPresence {
     api_access_remarks: Option<Vec<GuiApiAccessRemark>>,
     management_secret_key: Option<String>,
     close_behavior: Option<WindowsCloseBehavior>,
+    default_terminal: Option<String>,
     start_core_on_launch: Option<bool>,
     silent_start: Option<bool>,
     usage_statistics_enabled: Option<bool>,
     plugins_enabled: Option<bool>,
     routing_strategy: Option<String>,
     proxy_url: Option<String>,
+    download_source: Option<VersionDownloadSource>,
+    custom_download_mirrors: Option<Vec<String>>,
+    active_custom_download_mirror: Option<String>,
+    prefer_gitcode_downloads: Option<bool>,
     routing_session_affinity: Option<bool>,
     routing_session_affinity_ttl: Option<String>,
     request_retry: Option<u32>,
@@ -742,11 +940,21 @@ struct GuiSettings {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct VersionSourceSettings {
+    source: String,
+    gitcode_available: bool,
+    custom_mirrors: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SoftwareSettings {
     close_behavior: WindowsCloseBehavior,
     autostart_enabled: bool,
     start_core_on_launch: bool,
     silent_start_enabled: bool,
+    default_terminal: String,
+    available_terminals: Vec<AgentTerminalOption>,
 }
 
 #[derive(Deserialize)]
@@ -756,6 +964,7 @@ struct SoftwareSettingsInput {
     autostart_enabled: bool,
     start_core_on_launch: bool,
     silent_start_enabled: bool,
+    default_terminal: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -893,6 +1102,7 @@ struct ThinkingAliasEntry {
     effort: Option<String>,
     provider: String,
     kind: String,
+    oauth_channel: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -903,6 +1113,7 @@ struct SpeedAliasEntry {
     service_tier: String,
     provider: String,
     kind: String,
+    oauth_channel: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -914,11 +1125,15 @@ struct ThinkingAliasSource {
     provider: String,
     kind: String,
     protocol: String,
+    reasoning_levels: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ThinkingAliasSourceLocation {
-    CodexOauth,
+    Oauth {
+        channel: &'static str,
+        force_mapping: bool,
+    },
     ConfigModel {
         section: &'static str,
         provider_index: usize,
@@ -1426,6 +1641,7 @@ impl CoreProcessState {
     fn new(starting: bool) -> Self {
         Self {
             child: Mutex::new(None),
+            adopted_processes: Mutex::new(Vec::new()),
             starting: AtomicBool::new(starting),
             #[cfg(windows)]
             job: Mutex::new(None),
@@ -1441,21 +1657,29 @@ impl CoreProcessState {
     }
 
     fn managed_pid(&self) -> Option<u32> {
-        let Ok(mut child) = self.child.lock() else {
-            return None;
-        };
+        if let Ok(mut child) = self.child.lock() {
+            if let Some(process) = child.as_mut() {
+                if let Ok(None) = process.try_wait() {
+                    return Some(process.id());
+                }
 
-        let process = child.as_mut()?;
-
-        if let Ok(None) = process.try_wait() {
-            return Some(process.id());
+                *child = None;
+                drop(child);
+                self.clear_lifetime_guard();
+            }
         }
 
-        *child = None;
-        drop(child);
-        self.clear_lifetime_guard();
-
-        None
+        self.adopted_processes
+            .lock()
+            .ok()
+            .and_then(|mut processes| {
+                processes.retain(|process| {
+                    process_executable_path(process.process_id)
+                        .as_deref()
+                        .is_some_and(|path| executable_paths_match(&process.binary_path, path))
+                });
+                processes.first().map(|process| process.process_id)
+            })
     }
 
     fn clear_lifetime_guard(&self) {
@@ -1471,12 +1695,57 @@ impl CoreProcessState {
         self.child.lock().ok().and_then(|mut child| child.take())
     }
 
+    fn adopt_process_ids(&self, binary_path: &Path, process_ids: Vec<u32>) -> Result<(), String> {
+        let mut adopted = self
+            .adopted_processes
+            .lock()
+            .map_err(|_| "接管的内核进程状态锁已损坏".to_string())?;
+        *adopted = process_ids
+            .into_iter()
+            .filter(|process_id| is_process_alive(*process_id))
+            .map(|process_id| AdoptedCoreProcess {
+                process_id,
+                binary_path: binary_path.to_path_buf(),
+            })
+            .collect();
+        adopted.sort_unstable_by_key(|process| process.process_id);
+        adopted.dedup_by_key(|process| process.process_id);
+        Ok(())
+    }
+
+    fn clear_adopted_processes(&self) -> Result<(), String> {
+        self.adopted_processes
+            .lock()
+            .map(|mut processes| processes.clear())
+            .map_err(|_| "接管的内核进程状态锁已损坏".to_string())
+    }
+
+    fn take_adopted_processes(&self) -> Vec<AdoptedCoreProcess> {
+        self.adopted_processes
+            .lock()
+            .map(|mut processes| std::mem::take(&mut *processes))
+            .unwrap_or_default()
+    }
+
     fn store_child(&self, child: Child) -> Result<u32, String> {
         let pid = child.id();
+        self.clear_adopted_processes()?;
 
         #[cfg(windows)]
         {
-            let job = attach_child_to_windows_job(&child)?;
+            let job = match attach_child_to_windows_job(&child) {
+                Ok(job) => job,
+                Err(error) => {
+                    let mut child = child;
+                    let cleanup_error = terminate_child(&mut child).err();
+                    return Err(match cleanup_error {
+                        Some(cleanup_error) => {
+                            format!("{error}；清理未托管的内核进程也失败: {cleanup_error}")
+                        }
+                        None => error,
+                    });
+                }
+            };
             let Ok(mut managed_child) = self.child.lock() else {
                 close_windows_handle(job);
                 return Err("内核进程状态锁已损坏".to_string());
@@ -1491,10 +1760,19 @@ impl CoreProcessState {
 
         #[cfg(not(windows))]
         {
-            let mut managed_child = self
-                .child
-                .lock()
-                .map_err(|_| "内核进程状态锁已损坏".to_string())?;
+            let mut managed_child = match self.child.lock() {
+                Ok(managed_child) => managed_child,
+                Err(_) => {
+                    let mut child = child;
+                    let cleanup_error = terminate_child(&mut child).err();
+                    return Err(match cleanup_error {
+                        Some(cleanup_error) => format!(
+                            "内核进程状态锁已损坏；清理未托管的内核进程也失败: {cleanup_error}"
+                        ),
+                        None => "内核进程状态锁已损坏".to_string(),
+                    });
+                }
+            };
             *managed_child = Some(child);
         }
 
@@ -1640,11 +1918,13 @@ impl GuiConfigState {
         close_behavior: WindowsCloseBehavior,
         start_core_on_launch: bool,
         silent_start: bool,
+        default_terminal: String,
     ) -> Result<GuiConfigFile, String> {
         self.update(|config| {
             config.close_behavior = close_behavior;
             config.start_core_on_launch = start_core_on_launch;
             config.silent_start = silent_start;
+            config.default_terminal = normalize_agent_terminal(&default_terminal);
             Ok(())
         })
     }
@@ -1654,6 +1934,57 @@ impl GuiConfigState {
             config.locale = normalize_app_locale(&locale).to_string();
             Ok(())
         })
+    }
+
+    fn set_download_source(
+        &self,
+        download_source: VersionDownloadSource,
+    ) -> Result<GuiConfigFile, String> {
+        self.set_download_candidate(VersionDownloadCandidate::builtin(download_source))
+    }
+
+    fn set_download_candidate(
+        &self,
+        candidate: VersionDownloadCandidate,
+    ) -> Result<GuiConfigFile, String> {
+        self.update(|config| {
+            if let Some(url) = &candidate.custom_url {
+                if !config.custom_download_mirrors.contains(url) {
+                    return Err("自定义镜像不存在".to_string());
+                }
+                config.active_custom_download_mirror = url.clone();
+            }
+            config.download_source = candidate.source;
+            config.prefer_gitcode_downloads = candidate.source == VersionDownloadSource::Gitcode;
+            Ok(())
+        })
+    }
+
+    fn switch_download_source_after_failure(
+        &self,
+        expected_source: &VersionDownloadCandidate,
+        fallback_source: &VersionDownloadCandidate,
+    ) -> Result<Option<GuiConfigFile>, String> {
+        let mut current = self
+            .inner
+            .lock()
+            .map_err(|_| "GUI 配置状态锁已损坏".to_string())?;
+        if current.selected_download_candidate() != *expected_source
+            || expected_source == fallback_source
+        {
+            return Ok(None);
+        }
+
+        let mut config = current.clone();
+        config.download_source = fallback_source.source;
+        if let Some(url) = &fallback_source.custom_url {
+            config.active_custom_download_mirror = url.clone();
+        }
+        config.prefer_gitcode_downloads = fallback_source.source == VersionDownloadSource::Gitcode;
+        sanitize_gui_config(&mut config)?;
+        write_gui_config(&config)?;
+        *current = config.clone();
+        Ok(Some(config))
     }
 
     fn set_window_size(&self, size: SavedWindowSize) -> Result<GuiConfigFile, String> {
@@ -1827,6 +2158,14 @@ fn main() {
         }
     }
 
+    let _instance_guard = match acquire_app_instance_guard() {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("{error}");
+            return;
+        }
+    };
+
     let portable_update_ack = portable_update_ack_argument();
     let gui_config = match load_or_create_gui_config() {
         Ok(config) => config,
@@ -1995,7 +2334,24 @@ fn main() {
                     Err(error) => eprintln!("自动安装 CPA 离线内核失败: {error}"),
                 }
 
-                if should_start_core_on_launch(&config) {
+                let adopted_process_ids = match adopt_existing_core_processes(process_state.inner())
+                {
+                    Ok(process_ids) => process_ids,
+                    Err(error) => {
+                        eprintln!("扫描并接管当前目录的 CPA 内核失败: {error}");
+                        Vec::new()
+                    }
+                };
+                if !adopted_process_ids.is_empty() {
+                    eprintln!(
+                        "已接管当前目录中运行的 CPA 内核: PID {}",
+                        adopted_process_ids
+                            .iter()
+                            .map(u32::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                } else if should_start_core_on_launch(&config) {
                     if let Err(error) = start_core_process_inner(process_state.inner(), &config) {
                         eprintln!("自动启动 CPA 内核失败: {error}");
                     }
@@ -2039,6 +2395,7 @@ fn main() {
             check_codex_oauth_login,
             update_codex_model_catalog,
             get_thinking_aliases,
+            get_model_alias_sources,
             get_thinking_alias_sources,
             create_thinking_alias,
             delete_thinking_alias,
@@ -2084,6 +2441,11 @@ fn main() {
             list_oauth_browsers,
             open_oauth_url,
             open_external_url,
+            get_version_source_settings,
+            set_download_source,
+            add_custom_download_mirror,
+            remove_custom_download_mirror,
+            set_prefer_gitcode_downloads,
             check_app_update,
             get_app_update_task,
             start_app_update,
@@ -2099,6 +2461,7 @@ fn main() {
             usage::get_usage_analysis,
             usage::get_usage_events,
             usage::get_usage_pricing,
+            usage::repair_usage_cache_records,
             usage::save_usage_model_price,
             usage::delete_usage_model_price,
             usage::sync_usage_model_prices,
@@ -2128,22 +2491,6 @@ fn main() {
         tauri::RunEvent::Exit => {
             usage::stop_usage_collector(app_handle);
             let gui_config_state = app_handle.state::<GuiConfigState>();
-            match gui_config_state.snapshot() {
-                Ok(config) => {
-                    if let Err(error) =
-                        tauri::async_runtime::block_on(remove_managed_claude_model_aliases(&config))
-                    {
-                        eprintln!("退出时清理 EasyCLIProxyAPI 托管的 Claude 模型别名失败: {error}");
-                    }
-                }
-                Err(error) => {
-                    eprintln!("退出时读取 GUI 配置失败，无法清理 Claude 模型别名: {error}");
-                }
-            }
-            if let Ok(home) = app_handle.path().home_dir() {
-                let _guard = AGENT_CONFIG_FILE_LOCK.lock();
-                restore_all_agent_session_configurations(&home);
-            }
             let process_state = app_handle.state::<CoreProcessState>();
             shutdown_managed_core(process_state.inner(), gui_config_state.inner());
         }

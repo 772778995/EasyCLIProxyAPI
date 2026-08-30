@@ -25,6 +25,14 @@ quota inspection, usage records, model aliases, and agent client configuration i
 The application is built with Tauri, React, and Rust. It can carry a matching CLIProxyAPI core
 archive, making first-time setup and offline installation easier.
 
+## Sponsor
+
+[![https://go.apimart.ai/gh-easycliproxyapi](./assets/apimart-en.png)](https://go.apimart.ai/gh-easycliproxyapi)
+
+Thanks to APIMart for sponsoring this project!
+
+APIMart is a low-cost API platform for AI image & video generation — GPT-Image-2 from $0.006/image, 160+ images per dollar. One async API covers both image and video: submit a task, get an ID, fetch results via polling or callback. Batch tens of thousands of images without timeouts, switch models without changing code. Pay-as-you-go with no monthly fee — [sign up here](https://go.apimart.ai/gh-easycliproxyapi) to get started.
+
 ## Feature Tour
 
 ### Home dashboard and local API endpoints
@@ -39,7 +47,9 @@ The Home page provides a quick overview of the local proxy runtime and ready-to-
 - Check local connectivity and the application/core version at a glance.
 
 Core installation, version comparison, and offline installation are available from the
-**Version Management** page.
+**Version Management** page. You can switch between official GitHub, GitCode, and GitHub
+mirror proxies or add custom HTTPS mirror prefixes; application and core updates prefer the selected
+channel and fall back automatically.
 
 ### OAuth account authorization
 

@@ -42,7 +42,14 @@ pub(super) fn test_codex_oauth_thinking_source(model: &str) -> ResolvedThinkingA
             provider: "Codex OAuth".to_string(),
             kind: "codex-oauth".to_string(),
             protocol: "codex".to_string(),
+            reasoning_levels: vec!["low", "medium", "high", "xhigh", "max"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
         },
-        location: ThinkingAliasSourceLocation::CodexOauth,
+        location: ThinkingAliasSourceLocation::Oauth {
+            channel: "codex",
+            force_mapping: false,
+        },
     }
 }

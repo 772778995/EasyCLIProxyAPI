@@ -15,6 +15,7 @@ import {
   PackageOpen,
   ServerCog,
   Settings,
+  Sparkles,
   X,
 } from 'lucide-react';
 import appLogo from './assets/logo.jpg';
@@ -22,8 +23,10 @@ import { CoreRuntimeProvider, useCoreRuntime } from './coreRuntime';
 import { ConfigPanelPage } from './pages/ConfigPanel';
 import { ApiAccessPage } from './pages/ApiAccessPage';
 import { KernelPage } from './pages/Kernel';
+import { VersionManagementPage } from './pages/VersionManagementPage';
 import { OAuthManagementPage } from './pages/ManagementPages';
 import { AgentsPage } from './pages/AgentsPage';
+import { EasyModePage } from './pages/EasyModePage';
 import { UsageRecordsPage } from './pages/UsageRecordsPage';
 import { languageOptions, useI18n } from './i18n';
 import { AppUpdateDialog, AppUpdateProvider, useAppUpdate } from './appUpdate';
@@ -35,6 +38,13 @@ const CONTACT_URL = 'https://qm.qq.com/q/3queDaIG';
 
 const pages = [
   {
+    id: 'easy',
+    labelKey: 'app.nav.easy',
+    icon: Sparkles,
+    // The easy page is rendered separately so it can receive navigation callbacks.
+    component: HomePage,
+  },
+  {
     id: 'home',
     labelKey: 'app.nav.home',
     icon: House,
@@ -44,7 +54,7 @@ const pages = [
     id: 'versions',
     labelKey: 'app.nav.versions',
     icon: PackageOpen,
-    component: VersionManagementPage,
+    component: VersionManagementPageWrapper,
   },
   {
     id: 'config',
@@ -96,8 +106,8 @@ function HomePage() {
   return <KernelPage view="home" />;
 }
 
-function VersionManagementPage() {
-  return <KernelPage view="versions" />;
+function VersionManagementPageWrapper() {
+  return <VersionManagementPage />;
 }
 
 function App() {
@@ -126,7 +136,6 @@ function AppContent() {
   const ActivePage = activePage.component;
   const selectedLanguage = languageOptions.find((option) => option.value === locale)
     ?? languageOptions[0];
-
   useEffect(() => {
     saveTheme(theme);
   }, [theme]);
@@ -274,7 +283,7 @@ function AppContent() {
           </div>
 
           <nav className="nav-section" aria-label={t('app.navigation')}>
-            {pages.map((page) => {
+            {pages.filter((page) => page.id !== 'easy').map((page) => {
               const Icon = page.icon;
               const locked = !canOpenAppPage(page.id, coreRunning);
               const updateIndicator = page.id === 'versions'
@@ -284,7 +293,10 @@ function AppContent() {
                 <button
                   key={page.id}
                   type="button"
-                  className={[page.id === active ? 'active' : '', locked ? 'locked' : '']
+                  className={[
+                    page.id === active ? 'active' : '',
+                    locked ? 'locked' : '',
+                  ]
                     .filter(Boolean)
                     .join(' ')}
                   disabled={locked}
@@ -310,6 +322,14 @@ function AppContent() {
           </nav>
 
           <div className="sidebar-bottom">
+            <button
+              type="button"
+              className={`sidebar-easy-entry${active === 'easy' ? ' active' : ''}`}
+              aria-current={active === 'easy' ? 'page' : undefined}
+              onClick={() => select('easy')}
+            >
+              <span>{t('app.nav.easy')}</span>
+            </button>
             <div
               className="sidebar-theme-selector"
               role="group"
@@ -398,7 +418,11 @@ function AppContent() {
         <div className="workspace">
           <main className="content">
             {isAlwaysAvailablePage(activePage.id) || coreRunning ? (
-              <ActivePage />
+              activePage.id === 'easy' ? (
+                <EasyModePage />
+              ) : (
+                <ActivePage />
+              )
             ) : (
               <CoreLockedPage />
             )}

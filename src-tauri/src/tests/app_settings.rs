@@ -18,6 +18,8 @@ fn gui_field_edit_preserves_comments_and_unknown_configuration() {
         auth_dir: path_to_string(&home.join("custom-auth")),
         management_secret_key: "custom-secret".to_string(),
         usage_statistics_enabled: false,
+        download_source: VersionDownloadSource::Gitcode,
+        prefer_gitcode_downloads: true,
         ..GuiConfigFile::default()
     };
 
@@ -31,6 +33,8 @@ fn gui_field_edit_preserves_comments_and_unknown_configuration() {
     assert!(content.contains("silent-start = true"));
     assert!(content.contains("management-secret-key = \"custom-secret\""));
     assert!(content.contains("usage-statistics-enabled = false"));
+    assert!(content.contains("download-source = \"gitcode\""));
+    assert!(content.contains("prefer-gitcode-downloads = true"));
     assert!(!content.contains("codex-session-repair-on-launch"));
     assert!(!content.contains("claude-code-working-directory"));
     fs::remove_dir_all(home).unwrap();
@@ -80,8 +84,10 @@ fn gui_config_defaults_are_stable() {
     assert!(content.contains("start-core-on-launch = true"));
     assert!(content.contains("silent-start = false"));
     assert!(content.contains("close-behavior = \"ask\""));
-    assert!(content.contains("window-width = 1531"));
-    assert!(content.contains("window-height = 891"));
+    assert!(content.contains("default-terminal = \"auto\""));
+    assert_eq!(config.default_terminal, DEFAULT_AGENT_TERMINAL);
+    assert!(content.contains("window-width = 1280"));
+    assert!(content.contains("window-height = 800"));
     assert!(content.contains("auth-dir = \"../oauth\""));
     assert!(content.contains("[[api-keys]]"));
     assert!(content.contains("key = \"123456\""));
@@ -89,6 +95,8 @@ fn gui_config_defaults_are_stable() {
     assert!(content.contains("management-secret-key = \"\""));
     assert!(content.contains("plugins-enabled = false"));
     assert!(content.contains("routing-strategy = \"round-robin\""));
+    assert!(content.contains("download-source = \"github\""));
+    assert!(content.contains("prefer-gitcode-downloads = false"));
     assert!(content.contains("request-retry = 3"));
     assert!(content.contains("max-retry-credentials = 0"));
     assert!(content.contains("max-retry-interval = 30"));
@@ -162,6 +170,19 @@ fn gui_window_size_is_clamped_and_requires_both_dimensions() {
     assert!(sanitize_gui_config(&mut config).unwrap());
     assert_eq!(config.window_width, None);
     assert_eq!(config.window_height, None);
+}
+
+#[test]
+fn legacy_default_window_size_migrates_to_current_default() {
+    let mut config = GuiConfigFile {
+        window_width: Some(LEGACY_DEFAULT_MAIN_WINDOW_WIDTH),
+        window_height: Some(LEGACY_DEFAULT_MAIN_WINDOW_HEIGHT),
+        ..GuiConfigFile::default()
+    };
+
+    assert!(sanitize_gui_config(&mut config).unwrap());
+    assert_eq!(config.window_width, Some(DEFAULT_MAIN_WINDOW_WIDTH));
+    assert_eq!(config.window_height, Some(DEFAULT_MAIN_WINDOW_HEIGHT));
 }
 
 #[test]
