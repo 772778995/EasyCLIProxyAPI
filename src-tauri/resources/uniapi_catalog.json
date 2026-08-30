@@ -348,7 +348,7 @@
       "cacheReadPer1M": 0.017,
       "cacheCreationPer1M": 0.2125,
       "fixedPrice": null,
-      "contextWindow": 372000,
+      "contextWindow": 1050000,
       "inputModalities": [
         "text",
         "image"
@@ -376,7 +376,7 @@
       "cacheReadPer1M": 0.425,
       "cacheCreationPer1M": 5.3125,
       "fixedPrice": null,
-      "contextWindow": 372000,
+      "contextWindow": 1050000,
       "inputModalities": [
         "text",
         "image"
@@ -403,7 +403,7 @@
       "cacheReadPer1M": 0.17,
       "cacheCreationPer1M": 2.125,
       "fixedPrice": null,
-      "contextWindow": 372000,
+      "contextWindow": 1050000,
       "inputModalities": [
         "text",
         "image"

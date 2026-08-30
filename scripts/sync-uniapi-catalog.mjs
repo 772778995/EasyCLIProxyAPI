@@ -17,11 +17,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const catalogPath = join(root, "src-tauri", "resources", "uniapi_catalog.json");
 const pricesPath = join(root, "src-tauri", "resources", "model_prices.json");
 const pricesBasePath = join(root, "scripts", "model-prices.base.json");
-const claudeCatalogBasePath = join(
-	root,
-	"scripts",
-	"model-catalog.base.json",
-);
+const claudeCatalogBasePath = join(root, "scripts", "model-catalog.base.json");
 const claudeCatalogPath = join(
 	root,
 	"src-tauri",
@@ -81,9 +77,10 @@ const CONTEXT_WINDOWS = {
 	"glm-5.2": 1_048_576,
 	"glm-5.3": 1_048_576,
 	"glm-5.3-flash": 1_048_576,
-	"gpt-5.6-luna": 372_000,
-	"gpt-5.6-sol": 372_000,
-	"gpt-5.6-terra": 372_000,
+	"gpt-5.6": 1_050_000,
+	"gpt-5.6-luna": 1_050_000,
+	"gpt-5.6-sol": 1_050_000,
+	"gpt-5.6-terra": 1_050_000,
 	hy3: 256_000,
 	"kimi-k2.6": 256_000,
 	"kimi-k2.7-code": 256_000,
@@ -290,7 +287,9 @@ let baseClaude;
 try {
 	baseClaude = JSON.parse(await readFile(claudeCatalogBasePath, "utf8"));
 } catch (error) {
-	throw new Error(`解析 scripts/model-catalog.base.json 失败: ${error.message}`);
+	throw new Error(
+		`解析 scripts/model-catalog.base.json 失败: ${error.message}`,
+	);
 }
 const displayNames = {
 	"claude-fable-5": "Claude Fable 5",
