@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import appLogo from './assets/logo.jpg';
 import { CoreRuntimeProvider, useCoreRuntime } from './coreRuntime';
+import { CoreUpdateProvider, useCoreUpdate } from './coreUpdate';
 import { ConfigPanelPage } from './pages/ConfigPanel';
 import { ApiAccessPage } from './pages/ApiAccessPage';
 import { KernelPage } from './pages/Kernel';
@@ -41,7 +42,6 @@ const pages = [
     id: 'easy',
     labelKey: 'app.nav.easy',
     icon: Sparkles,
-    // The easy page is rendered separately so it can receive navigation callbacks.
     component: HomePage,
   },
   {
@@ -114,7 +114,9 @@ function App() {
   return (
     <AppUpdateProvider>
       <CoreRuntimeProvider>
-        <AppContent />
+        <CoreUpdateProvider>
+          <AppContent />
+        </CoreUpdateProvider>
       </CoreRuntimeProvider>
     </AppUpdateProvider>
   );
@@ -123,6 +125,7 @@ function App() {
 function AppContent() {
   const { locale, setLocale, t } = useI18n();
   const { info: appUpdateInfo, hasUpdate, processing: appUpdateProcessing } = useAppUpdate();
+  const { latest: coreLatest, hasUpdate: coreHasUpdate } = useCoreUpdate();
   const [active, setActive] = useState<PageId>('home');
   const [languageMenuOpen, setLanguageMenuOpen] = useState(false);
   const [theme, setTheme] = useState<AppTheme>(detectInitialTheme);
@@ -136,6 +139,14 @@ function AppContent() {
   const ActivePage = activePage.component;
   const selectedLanguage = languageOptions.find((option) => option.value === locale)
     ?? languageOptions[0];
+  const availableUpdateLabel = [
+    hasUpdate
+      ? t('appUpdate.badgeAvailable', { version: appUpdateInfo?.latestVersion ?? '' })
+      : '',
+    coreHasUpdate
+      ? `${t('kernel.versions.coreCardTitle')}: ${t('kernel.update.available')} ${coreLatest?.version ?? ''}`.trim()
+      : '',
+  ].filter(Boolean).join(' · ');
   useEffect(() => {
     saveTheme(theme);
   }, [theme]);
@@ -272,8 +283,9 @@ function AppContent() {
 
   return (
     <>
-      <div className="app-shell">
-        <aside className="sidebar">
+      <div className={`app-shell${active === "easy" ? " app-shell-easy-mode" : ""}`}>
+        {active !== "easy" ? (
+          <aside className="sidebar">
           <div className="sidebar-brand" title="CLI Proxy API GUI">
             <img src={appLogo} alt="" className="brand-mark brand-logo" />
             <div>
@@ -287,7 +299,7 @@ function AppContent() {
               const Icon = page.icon;
               const locked = !canOpenAppPage(page.id, coreRunning);
               const updateIndicator = page.id === 'versions'
-                ? appUpdateIndicatorState(hasUpdate, appUpdateProcessing)
+                ? appUpdateIndicatorState(hasUpdate, coreHasUpdate, appUpdateProcessing)
                 : null;
               return (
                 <button
@@ -310,10 +322,10 @@ function AppContent() {
                       className={`nav-update-indicator ${updateIndicator}`}
                       title={updateIndicator === 'processing'
                         ? t('appUpdate.progressTitle')
-                        : t('appUpdate.badgeAvailable', { version: appUpdateInfo?.latestVersion ?? '' })}
+                        : availableUpdateLabel}
                       aria-label={updateIndicator === 'processing'
                         ? t('appUpdate.progressTitle')
-                        : t('appUpdate.badgeAvailable', { version: appUpdateInfo?.latestVersion ?? '' })}
+                        : availableUpdateLabel}
                     />
                   ) : null}
                 </button>
@@ -324,8 +336,7 @@ function AppContent() {
           <div className="sidebar-bottom">
             <button
               type="button"
-              className={`sidebar-easy-entry${active === 'easy' ? ' active' : ''}`}
-              aria-current={active === 'easy' ? 'page' : undefined}
+              className="sidebar-easy-entry"
               onClick={() => select('easy')}
             >
               <span>{t('app.nav.easy')}</span>
@@ -413,13 +424,20 @@ function AppContent() {
               <ExternalLink size={13} aria-hidden="true" />
             </button>
           </div>
-        </aside>
+          </aside>
+        ) : null}
 
         <div className="workspace">
           <main className="content">
             {isAlwaysAvailablePage(activePage.id) || coreRunning ? (
               activePage.id === 'easy' ? (
-                <EasyModePage />
+                <EasyModePage
+                  onExit={() => select('home')}
+                  theme={theme}
+                  setTheme={setTheme}
+                  locale={locale}
+                  setLocale={setLocale}
+                />
               ) : (
                 <ActivePage />
               )

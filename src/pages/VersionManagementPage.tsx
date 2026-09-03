@@ -13,13 +13,9 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useCoreRuntime } from '../coreRuntime';
+import { useCoreUpdate } from '../coreUpdate';
 import { useI18n } from '../i18n';
 import { useAppUpdate } from '../appUpdate';
-
-export type CoreLatest = {
-  version: string;
-  assetName: string;
-};
 
 export type CoreInstallResult = {
   version: string;
@@ -67,47 +63,11 @@ function downloadSourceLabel(source: VersionDownloadSource, t: ReturnType<typeof
 
 export type MessageType = 'info' | 'success' | 'error';
 const APP_RELEASE_URL = 'https://github.com/router-for-me/EasyCLIProxyAPI/releases/latest';
-
-let latestAutoCheckStarted = false;
-let cachedLatest: CoreLatest | null = null;
-let cachedLatestError = '';
-let latestCheckPromise: Promise<CoreLatest> | null = null;
-let latestRequestEpoch = 0;
+export const DEFAULT_VERSION_DOWNLOAD_SOURCE = 'github';
 
 export function displayAppVersion(version: string) {
   const resolvedVersion = version.trim();
   return resolvedVersion.startsWith('v') ? resolvedVersion : `v${resolvedVersion}`;
-}
-
-export function requestLatestCore(force = false) {
-  if (!force && latestCheckPromise) {
-    return latestCheckPromise;
-  }
-
-  const requestEpoch = ++latestRequestEpoch;
-  const request = invoke<CoreLatest>('check_latest_core')
-    .then((result) => {
-      if (requestEpoch === latestRequestEpoch) {
-        cachedLatest = result;
-        cachedLatestError = '';
-      }
-      return result;
-    })
-    .catch((error) => {
-      if (requestEpoch === latestRequestEpoch) {
-        cachedLatest = null;
-        cachedLatestError = String(error);
-      }
-      throw error;
-    })
-    .finally(() => {
-      if (latestCheckPromise === request) {
-        latestCheckPromise = null;
-      }
-    });
-  latestCheckPromise = request;
-
-  return request;
 }
 
 export function VersionManagementPage() {
@@ -126,11 +86,16 @@ export function VersionManagementPage() {
     statusError,
     refreshStatus,
   } = useCoreRuntime();
+  const {
+    latest,
+    error: latestError,
+    checking: checkingLatest,
+    hasUpdate: coreHasUpdate,
+    check: checkLatest,
+    reset: resetLatest,
+  } = useCoreUpdate();
 
   const [installedAppVersion, setInstalledAppVersion] = useState('');
-  const [latest, setLatest] = useState<CoreLatest | null>(cachedLatest);
-  const [latestError, setLatestError] = useState(cachedLatestError);
-  const [checkingLatest, setCheckingLatest] = useState(Boolean(latestCheckPromise));
 
   const [installing, setInstalling] = useState(false);
   const [progress, setProgress] = useState<CoreInstallTask | null>(null);
@@ -151,8 +116,9 @@ export function VersionManagementPage() {
 
   const installDialogRef = useRef<HTMLDivElement>(null);
   const customMirrorInputRef = useRef<HTMLInputElement>(null);
-  const latestCheckEpochRef = useRef(0);
   const toastTimerRef = useRef<number | null>(null);
+  const completedInstallKeyRef = useRef('');
+  const manualInstallInProgressRef = useRef(false);
 
   const showToast = (message: string, tone: MessageType = 'info') => {
     if (toastTimerRef.current !== null) {
@@ -165,7 +131,18 @@ export function VersionManagementPage() {
     }, 4000);
   };
 
-  const applyInstallTask = (task: CoreInstallTask, showFinishedDialog = true) => {
+  const showInstallCompletedToast = (result: CoreInstallResult, message?: string | null) => {
+    const key = `${result.version}\u0000${result.assetName}\u0000${result.binaryPath ?? ''}`;
+    if (completedInstallKeyRef.current === key) return;
+    completedInstallKeyRef.current = key;
+    showToast(message || t('kernel.install.completed', { version: result.version }), 'success');
+  };
+
+  const applyInstallTask = (
+    task: CoreInstallTask,
+    showFinishedDialog = true,
+    showCompletionToast = true,
+  ) => {
     if (!task.running && !task.message && !task.result) {
       setProgress(null);
       setInstalling(false);
@@ -178,15 +155,21 @@ export function VersionManagementPage() {
       setCancellingInstall(false);
     }
 
-    if (task.running || showFinishedDialog) {
+    if (showCompletionToast && (task.running || showFinishedDialog)) {
       setProgress(task);
       setInstallDialogOpen(true);
     } else {
       setProgress(null);
+      setInstallDialogOpen(false);
     }
 
     if (task.result) {
-      showToast(task.message || t('kernel.install.completed', { version: task.result.version }), 'success');
+      if (showCompletionToast) {
+        showInstallCompletedToast(task.result, task.message);
+      }
+      setInstallDialogOpen(false);
+      setProgress(null);
+      setCancellingInstall(false);
       void refreshStatus();
       return;
     }
@@ -209,30 +192,8 @@ export function VersionManagementPage() {
   const loadInstallTask = async () => {
     try {
       const task = await invoke<CoreInstallTask>('get_core_install_task');
-      applyInstallTask(task, false);
+      applyInstallTask(task, false, false);
     } catch {}
-  };
-
-  const checkLatest = async (force = false) => {
-    const checkEpoch = ++latestCheckEpochRef.current;
-    setCheckingLatest(true);
-    setLatestError('');
-
-    try {
-      const result = await requestLatestCore(force);
-      if (checkEpoch === latestCheckEpochRef.current) {
-        setLatest(result);
-      }
-    } catch (error) {
-      if (checkEpoch === latestCheckEpochRef.current) {
-        setLatest(null);
-        setLatestError(String(error));
-      }
-    } finally {
-      if (checkEpoch === latestCheckEpochRef.current) {
-        setCheckingLatest(false);
-      }
-    }
   };
 
   const updateVersionSource = async (source: VersionDownloadSource) => {
@@ -241,9 +202,7 @@ export function VersionManagementPage() {
     try {
       const settings = await invoke<VersionSourceSettings>('set_download_source', { source });
       setVersionSource(settings);
-      cachedLatest = null;
-      cachedLatestError = '';
-      setLatest(null);
+      resetLatest();
       showToast(t('kernel.versions.sourceSwitched', {
         source: downloadSourceLabel(settings.source, t),
       }), 'info');
@@ -269,9 +228,7 @@ export function VersionManagementPage() {
       setVersionSource(settings);
       setCustomMirrorDraft('');
       setCustomMirrorDialogOpen(false);
-      cachedLatest = null;
-      cachedLatestError = '';
-      setLatest(null);
+      resetLatest();
       showToast(t('kernel.versions.customMirrorAdded'), 'success');
       setVersionSourceSaving(false);
       await checkAppUpdate();
@@ -310,6 +267,8 @@ export function VersionManagementPage() {
   };
 
   const installVersion = async (version: string) => {
+    completedInstallKeyRef.current = '';
+    manualInstallInProgressRef.current = true;
     setInstalling(true);
     setCancellingInstall(false);
     setInstallDialogOpen(true);
@@ -326,7 +285,8 @@ export function VersionManagementPage() {
 
     try {
       const result = await invoke<CoreInstallResult>('install_core_version', { version });
-      showToast(t('kernel.install.completed', { version: result.version }), 'success');
+      showInstallCompletedToast(result, t('kernel.install.completed', { version: result.version }));
+      manualInstallInProgressRef.current = false;
       setProgress({
         running: false,
         cancellable: false,
@@ -337,8 +297,12 @@ export function VersionManagementPage() {
         message: t('kernel.install.completed', { version: result.version }),
         result,
       });
+      setInstallDialogOpen(false);
+      setProgress(null);
+      setCancellingInstall(false);
       await refreshStatus();
     } catch (error) {
+      manualInstallInProgressRef.current = false;
       const errorMessage = String(error);
       showToast(errorMessage, errorMessage.includes('取消') ? 'info' : 'error');
       setProgress((current) => ({
@@ -394,7 +358,11 @@ export function VersionManagementPage() {
     let unlistenVersionSource: (() => void) | null = null;
 
     listen<CoreInstallTask>('core-install-progress', (event) => {
-      applyInstallTask(event.payload);
+      const showTaskUi = manualInstallInProgressRef.current;
+      applyInstallTask(event.payload, showTaskUi, showTaskUi);
+      if (!event.payload.running) {
+        manualInstallInProgressRef.current = false;
+      }
     })
       .then((unlistenProgress) => {
         if (disposed) unlistenProgress();
@@ -424,20 +392,39 @@ export function VersionManagementPage() {
     });
 
     loadInstallTask();
-    loadVersionSourceSettings();
+
+    const initializeDefaultVersionSource = async () => {
+      setVersionSourceSaving(true);
+      setVersionSourceError('');
+      try {
+        const settings = await invoke<VersionSourceSettings>('set_download_source', {
+          source: DEFAULT_VERSION_DOWNLOAD_SOURCE,
+        });
+        if (disposed) return;
+        setVersionSource(settings);
+        resetLatest();
+        await Promise.all([
+          checkAppUpdate(),
+          checkLatest(true),
+        ]);
+      } catch (error) {
+        if (!disposed) {
+          await loadVersionSourceSettings();
+          setVersionSourceError(String(error));
+        }
+      } finally {
+        if (!disposed) {
+          setVersionSourceSaving(false);
+        }
+      }
+    };
+    void initializeDefaultVersionSource();
 
     void getVersion()
       .then((version) => {
         if (!disposed) setInstalledAppVersion(version);
       })
       .catch(() => undefined);
-
-    if (!latestAutoCheckStarted) {
-      latestAutoCheckStarted = true;
-      void checkLatest();
-    } else if (latestCheckPromise) {
-      void checkLatest();
-    }
 
     return () => {
       disposed = true;
@@ -516,8 +503,6 @@ export function VersionManagementPage() {
     : appUpdateTask.running || checkingAppUpdate || !appUpdate
       ? 'info'
       : 'update';
-
-  const coreHasUpdate = Boolean(latestVersion && currentVersion && currentVersion !== latestVersion);
 
   const coreVersionStatusTone = installing || progress?.running
     ? 'info'
@@ -601,7 +586,7 @@ export function VersionManagementPage() {
             <label>
               <span className="sr-only">{t('kernel.versions.downloadSource')}</span>
               <select
-                value={versionSource?.source ?? 'github'}
+                value={versionSource?.source ?? DEFAULT_VERSION_DOWNLOAD_SOURCE}
                 disabled={
                   !versionSource
                   || versionSourceSaving

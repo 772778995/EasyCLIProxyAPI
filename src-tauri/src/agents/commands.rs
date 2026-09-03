@@ -437,6 +437,7 @@ pub(crate) async fn create_thinking_alias(
     source_id: String,
     alias: String,
     effort: String,
+    fast: Option<bool>,
 ) -> Result<Vec<ThinkingAliasEntry>, String> {
     let config = gui_config_state.snapshot()?;
     let source_id = source_id.trim().to_string();
@@ -449,12 +450,15 @@ pub(crate) async fn create_thinking_alias(
     } else {
         validate_thinking_alias_effort(&effort)?
     };
+    let fast = fast.unwrap_or(false);
     let content = fetch_management_config_yaml(&config).await?;
     let available_models =
         fetch_agent_models(config.port, effective_agent_api_key(&config)).await?;
     let definitions = fetch_oauth_model_definitions(&config).await;
     let capability = if !effort.is_empty() {
         AliasSourceCapability::Reasoning
+    } else if fast {
+        AliasSourceCapability::Fast
     } else {
         AliasSourceCapability::Base
     };
@@ -467,6 +471,9 @@ pub(crate) async fn create_thinking_alias(
         .ok_or_else(|| {
             "原模型已不在内核当前可用模型中，或其配置来源已经变化，请刷新后重新选择".to_string()
         })?;
+    if fast && !alias_source_supports_fast(&source) {
+        return Err("Fast 仅支持 OpenAI 兼容 API、Codex API 或 Codex OAuth 模型源".to_string());
+    }
     if !effort.is_empty()
         && !source
             .source
@@ -498,7 +505,7 @@ pub(crate) async fn create_thinking_alias(
         return Err(format!("别名模型 {alias} 已存在"));
     }
 
-    let updated = add_model_alias_to_yaml(&content, &source, &alias, &effort)?;
+    let updated = add_model_alias_to_yaml(&content, &source, &alias, &effort, fast)?;
     put_management_alias_config_changes(&config, &content, &updated).await?;
     thinking_aliases_from_yaml(&updated)
 }
@@ -1028,6 +1035,11 @@ pub(crate) async fn set_agent_config_enabled(
         let _guard = AGENT_CONFIG_FILE_LOCK
             .lock()
             .map_err(|_| "智能体配置文件锁已损坏".to_string())?;
+        let oauth_configuration = if client == AgentClient::Codex {
+            current_codex_oauth_configuration(&home)?
+        } else {
+            false
+        };
         apply_agent_configuration_with_oauth(
             client,
             &home,
@@ -1037,7 +1049,7 @@ pub(crate) async fn set_agent_config_enabled(
             AgentConfigurationOptions {
                 models: &prepared.models,
                 codex_catalog: prepared.codex_catalog.as_deref(),
-                oauth_configuration: false,
+                oauth_configuration,
                 claude_code_model_mappings: claude_code_model_mappings.as_ref(),
                 claude_desktop_model_mappings: claude_desktop_model_mappings.as_ref(),
             },
@@ -1088,6 +1100,11 @@ pub(crate) async fn update_agent_config(
     let _guard = AGENT_CONFIG_FILE_LOCK
         .lock()
         .map_err(|_| "智能体配置文件锁已损坏".to_string())?;
+    let oauth_configuration = if client == AgentClient::Codex {
+        current_codex_oauth_configuration(&home)?
+    } else {
+        false
+    };
     apply_agent_configuration_with_oauth(
         client,
         &home,
@@ -1097,7 +1114,7 @@ pub(crate) async fn update_agent_config(
         AgentConfigurationOptions {
             models: &prepared.models,
             codex_catalog: prepared.codex_catalog.as_deref(),
-            oauth_configuration: false,
+            oauth_configuration,
             claude_code_model_mappings: claude_code_model_mappings.as_ref(),
             claude_desktop_model_mappings: claude_desktop_model_mappings.as_ref(),
         },

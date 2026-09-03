@@ -8,8 +8,9 @@ use super::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    error::Error,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
 };
@@ -94,7 +95,7 @@ pub(crate) async fn management_request(
     let response = builder
         .send()
         .await
-        .map_err(|err| format!("请求管理 API 失败: {err}"))?;
+        .map_err(|err| format_management_request_error("请求管理 API 失败", &err))?;
     read_management_value(response).await
 }
 
@@ -121,7 +122,7 @@ pub(crate) async fn upload_auth_file(
         .body(data)
         .send()
         .await
-        .map_err(|err| format!("上传认证文件失败: {err}"))?;
+        .map_err(|err| format_management_request_error("上传认证文件失败", &err))?;
     read_management_value(response).await
 }
 
@@ -135,6 +136,23 @@ pub(crate) fn open_auth_files_directory(
     fs::create_dir_all(&auth_dir)
         .map_err(|error| format!("创建凭证目录失败 {}: {error}", path_to_string(&auth_dir)))?;
     open_directory_in_file_manager(&auth_dir)
+}
+
+#[tauri::command]
+pub(crate) fn open_core_logs_directory(
+    gui_config_state: tauri::State<'_, GuiConfigState>,
+) -> Result<(), String> {
+    let config = gui_config_state.snapshot()?;
+    let install_dir = core_install_dir()?;
+    let logs_dir = core_logs_dir_path(&config.auth_dir, &install_dir);
+    fs::create_dir_all(&logs_dir)
+        .map_err(|error| format!("创建日志目录失败 {}: {error}", path_to_string(&logs_dir)))?;
+
+    open_directory_in_file_manager(&logs_dir)
+}
+
+fn core_logs_dir_path(auth_dir: &str, install_dir: &Path) -> PathBuf {
+    auth_dir_path_for_core(auth_dir, install_dir).join("logs")
 }
 
 fn open_directory_in_file_manager(path: &Path) -> Result<(), String> {
@@ -154,7 +172,7 @@ fn open_directory_in_file_manager(path: &Path) -> Result<(), String> {
     command
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("打开凭证目录失败 {}: {error}", path_to_string(path)))
+        .map_err(|error| format!("打开目录失败 {}: {error}", path_to_string(path)))
 }
 
 #[tauri::command]
@@ -179,7 +197,7 @@ pub(crate) async fn start_oauth_login(
     let response = request
         .send()
         .await
-        .map_err(|err| format!("请求 OAuth 登录链接失败: {err}"))?;
+        .map_err(|err| format_management_request_error("请求 OAuth 登录链接失败", &err))?;
     let payload = read_management_json::<OAuthStartApiResponse>(response).await?;
     if let Some(error) = payload
         .error
@@ -228,7 +246,7 @@ pub(crate) async fn get_oauth_status(
         .query(&[("state", state)])
         .send()
         .await
-        .map_err(|err| format!("查询 OAuth 状态失败: {err}"))?;
+        .map_err(|err| format_management_request_error("查询 OAuth 状态失败", &err))?;
     let payload = read_management_json::<OAuthStatusApiResponse>(response).await?;
     let status = payload
         .status
@@ -268,12 +286,12 @@ pub(crate) async fn submit_oauth_callback(
         .json(&body)
         .send()
         .await
-        .map_err(|err| format!("提交 OAuth 回调失败: {err}"))?;
+        .map_err(|err| format_management_request_error("提交 OAuth 回调失败", &err))?;
     let status = response.status();
     let text = response
         .text()
         .await
-        .map_err(|err| format!("读取 OAuth 回调响应失败: {err}"))?;
+        .map_err(|err| format_management_request_error("读取 OAuth 回调响应失败", &err))?;
     if !status.is_success() {
         return Err(format_management_error(status.as_u16(), &text));
     }
@@ -282,13 +300,44 @@ pub(crate) async fn submit_oauth_callback(
 
 pub(crate) fn management_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
+        // GUI-to-Core management traffic must always connect directly. Upstream
+        // traffic still uses Core's proxy-url, and other GUI HTTP clients keep
+        // their independently configured proxy behavior.
+        .no_proxy()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         // Management requests target the configured local listener. This keeps
         // self-signed/private-CA certificates usable without weakening upstream clients.
         .danger_accept_invalid_certs(true)
         .build()
-        .map_err(|err| format!("创建管理 API 客户端失败: {err}"))
+        .map_err(|err| format_management_request_error("创建管理 API 客户端失败", &err))
+}
+
+pub(crate) fn format_management_request_error(
+    action: &str,
+    error: &(dyn Error + 'static),
+) -> String {
+    let mut messages = Vec::new();
+    let mut current = Some(error);
+
+    while let Some(error) = current {
+        let message = error.to_string();
+        if !message.is_empty()
+            && messages
+                .last()
+                .map(|previous| previous != &message)
+                .unwrap_or(true)
+        {
+            messages.push(message);
+        }
+        current = error.source();
+    }
+
+    if messages.is_empty() {
+        action.to_string()
+    } else {
+        format!("{action}: {}", messages.join(": "))
+    }
 }
 
 pub(crate) fn management_authorization(config: &GuiConfigFile) -> Result<String, String> {
@@ -342,7 +391,7 @@ where
     let text = response
         .text()
         .await
-        .map_err(|err| format!("读取管理 API 响应失败: {err}"))?;
+        .map_err(|err| format_management_request_error("读取管理 API 响应失败", &err))?;
     if !status.is_success() {
         return Err(format_management_error(status.as_u16(), &text));
     }
@@ -364,7 +413,7 @@ pub(crate) async fn read_management_value(
     let text = response
         .text()
         .await
-        .map_err(|err| format!("读取管理 API 响应失败: {err}"))?;
+        .map_err(|err| format_management_request_error("读取管理 API 响应失败", &err))?;
     if !status.is_success() {
         return Err(format_management_error(status.as_u16(), &text));
     }
@@ -382,7 +431,7 @@ pub(crate) async fn read_management_text(response: reqwest::Response) -> Result<
     let text = response
         .text()
         .await
-        .map_err(|err| format!("读取管理 API 响应失败: {err}"))?;
+        .map_err(|err| format_management_request_error("读取管理 API 响应失败", &err))?;
     if !status.is_success() {
         return Err(format_management_error(status.as_u16(), &text));
     }
@@ -407,5 +456,32 @@ fn format_management_error(status: u16, body: &str) -> String {
         format!("管理 API 错误 ({status})")
     } else {
         format!("管理 API 错误 ({status}): {}", truncate_for_error(body))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_logs_follow_the_default_auth_directory() {
+        let base_dir = PathBuf::from("test-base");
+        let install_dir = base_dir.join("cpa-core");
+
+        assert_eq!(
+            core_logs_dir_path("../oauth", &install_dir),
+            base_dir.join("oauth").join("logs")
+        );
+    }
+
+    #[test]
+    fn core_logs_follow_a_custom_auth_directory() {
+        let install_dir = PathBuf::from("test-base").join("cpa-core");
+        let auth_dir = PathBuf::from("custom-auth");
+
+        assert_eq!(
+            core_logs_dir_path(auth_dir.to_str().unwrap(), &install_dir),
+            install_dir.join(auth_dir).join("logs")
+        );
     }
 }

@@ -417,6 +417,11 @@ pub(crate) fn patch_core_network_routing_yaml(
         )?;
         set_core_yaml_top_level_value(
             document,
+            "disable-cooling",
+            serde_norway::Value::Bool(config.disable_cooling),
+        )?;
+        set_core_yaml_top_level_value(
+            document,
             "request-retry",
             serde_norway::to_value(config.request_retry)
                 .map_err(|err| format!("序列化请求重试次数失败: {err}"))?,
@@ -466,6 +471,11 @@ pub(crate) fn patch_core_retry_yaml(
 ) -> Result<Option<String>, String> {
     patch_core_yaml_document(content, |document| {
         let original = document.clone();
+        set_core_yaml_top_level_value(
+            document,
+            "disable-cooling",
+            serde_norway::Value::Bool(config.disable_cooling),
+        )?;
         set_core_yaml_top_level_value(
             document,
             "request-retry",
@@ -577,8 +587,46 @@ pub(crate) fn apply_gui_managed_settings(
         )?;
         changed |= set_core_yaml_top_level_value(
             document,
+            "debug",
+            serde_norway::Value::Bool(config.debug),
+        )?;
+        changed |= set_core_yaml_top_level_value(
+            document,
+            "commercial-mode",
+            serde_norway::Value::Bool(config.commercial_mode),
+        )?;
+        changed |= set_core_yaml_top_level_value(
+            document,
+            "logging-to-file",
+            serde_norway::Value::Bool(config.logging_to_file),
+        )?;
+        changed |= set_core_yaml_top_level_value(
+            document,
+            "logs-max-total-size-mb",
+            serde_norway::to_value(config.logs_max_total_size_mb)
+                .map_err(|err| format!("序列化日志容量限制失败: {err}"))?,
+        )?;
+        changed |= set_core_yaml_top_level_value(
+            document,
+            "error-logs-max-files",
+            serde_norway::to_value(config.error_logs_max_files)
+                .map_err(|err| format!("序列化错误日志保留数失败: {err}"))?,
+        )?;
+        changed |= set_core_yaml_top_level_value(
+            document,
             "usage-statistics-enabled",
             serde_norway::Value::Bool(config.usage_statistics_enabled),
+        )?;
+        changed |= set_core_yaml_top_level_value(
+            document,
+            "redis-usage-queue-retention-seconds",
+            serde_norway::to_value(config.redis_usage_queue_retention_seconds)
+                .map_err(|err| format!("序列化 Redis 用量队列保留时间失败: {err}"))?,
+        )?;
+        changed |= set_core_yaml_top_level_value(
+            document,
+            "request-log",
+            serde_norway::Value::Bool(config.request_log),
         )?;
         changed |= set_core_yaml_nested_value(
             document,
@@ -614,6 +662,11 @@ pub(crate) fn apply_gui_managed_settings(
             "routing",
             "session-affinity-ttl",
             serde_norway::Value::String(config.routing_session_affinity_ttl.clone()),
+        )?;
+        changed |= set_core_yaml_top_level_value(
+            document,
+            "disable-cooling",
+            serde_norway::Value::Bool(config.disable_cooling),
         )?;
         changed |= set_core_yaml_top_level_value(
             document,
@@ -1140,12 +1193,20 @@ pub(crate) fn load_or_create_gui_config() -> Result<GuiConfigFile, String> {
         || presence.auth_dir.is_none()
         || presence.api_keys.is_none()
         || presence.management_secret_key.is_none()
+        || presence.debug.is_none()
+        || presence.commercial_mode.is_none()
+        || presence.logging_to_file.is_none()
+        || presence.logs_max_total_size_mb.is_none()
+        || presence.error_logs_max_files.is_none()
         || presence.usage_statistics_enabled.is_none()
+        || presence.redis_usage_queue_retention_seconds.is_none()
+        || presence.request_log.is_none()
         || presence.plugins_enabled.is_none()
         || presence.routing_strategy.is_none()
         || presence.proxy_url.is_none()
         || presence.routing_session_affinity.is_none()
         || presence.routing_session_affinity_ttl.is_none()
+        || presence.disable_cooling.is_none()
         || presence.request_retry.is_none()
         || presence.max_retry_credentials.is_none()
         || presence.max_retry_interval.is_none()
@@ -1177,6 +1238,28 @@ pub(crate) fn load_or_create_gui_config() -> Result<GuiConfigFile, String> {
             if presence.usage_statistics_enabled.is_none() {
                 config.usage_statistics_enabled = core_settings.usage_statistics_enabled;
             }
+            if presence.debug.is_none() {
+                config.debug = core_settings.debug;
+            }
+            if presence.commercial_mode.is_none() {
+                config.commercial_mode = core_settings.commercial_mode;
+            }
+            if presence.logging_to_file.is_none() {
+                config.logging_to_file = core_settings.logging_to_file;
+            }
+            if presence.logs_max_total_size_mb.is_none() {
+                config.logs_max_total_size_mb = core_settings.logs_max_total_size_mb;
+            }
+            if presence.error_logs_max_files.is_none() {
+                config.error_logs_max_files = core_settings.error_logs_max_files;
+            }
+            if presence.redis_usage_queue_retention_seconds.is_none() {
+                config.redis_usage_queue_retention_seconds =
+                    core_settings.redis_usage_queue_retention_seconds;
+            }
+            if presence.request_log.is_none() {
+                config.request_log = core_settings.request_log;
+            }
             if presence.management_secret_key.is_none() {
                 config.management_secret_key = core_settings
                     .management_secret_key
@@ -1196,6 +1279,9 @@ pub(crate) fn load_or_create_gui_config() -> Result<GuiConfigFile, String> {
             }
             if presence.routing_session_affinity_ttl.is_none() {
                 config.routing_session_affinity_ttl = core_settings.routing_session_affinity_ttl;
+            }
+            if presence.disable_cooling.is_none() {
+                config.disable_cooling = core_settings.disable_cooling;
             }
             if presence.request_retry.is_none() {
                 config.request_retry = core_settings.request_retry;
@@ -1295,12 +1381,20 @@ pub(crate) fn apply_core_settings_to_gui_config(
     {
         config.management_secret_key = secret_key.to_string();
     }
+    config.debug = core_settings.debug;
+    config.commercial_mode = core_settings.commercial_mode;
+    config.logging_to_file = core_settings.logging_to_file;
+    config.logs_max_total_size_mb = core_settings.logs_max_total_size_mb;
+    config.error_logs_max_files = core_settings.error_logs_max_files;
     config.usage_statistics_enabled = core_settings.usage_statistics_enabled;
+    config.redis_usage_queue_retention_seconds = core_settings.redis_usage_queue_retention_seconds;
+    config.request_log = core_settings.request_log;
     config.plugins_enabled = core_settings.plugins_enabled;
     config.routing_strategy = core_settings.routing_strategy.clone();
     config.proxy_url = core_settings.proxy_url.clone();
     config.routing_session_affinity = core_settings.routing_session_affinity;
     config.routing_session_affinity_ttl = core_settings.routing_session_affinity_ttl.clone();
+    config.disable_cooling = core_settings.disable_cooling;
     config.request_retry = core_settings.request_retry;
     config.max_retry_credentials = core_settings.max_retry_credentials;
     config.max_retry_interval = core_settings.max_retry_interval;
@@ -1656,10 +1750,26 @@ pub(crate) fn write_gui_config_to_path(
             "management-secret-key",
             value(config.management_secret_key.as_str()),
         ),
+        ("debug", value(config.debug)),
+        ("commercial-mode", value(config.commercial_mode)),
+        ("logging-to-file", value(config.logging_to_file)),
+        (
+            "logs-max-total-size-mb",
+            value(i64::from(config.logs_max_total_size_mb)),
+        ),
+        (
+            "error-logs-max-files",
+            value(i64::from(config.error_logs_max_files)),
+        ),
         (
             "usage-statistics-enabled",
             value(config.usage_statistics_enabled),
         ),
+        (
+            "redis-usage-queue-retention-seconds",
+            value(i64::from(config.redis_usage_queue_retention_seconds)),
+        ),
+        ("request-log", value(config.request_log)),
         ("plugins-enabled", value(config.plugins_enabled)),
         ("routing-strategy", value(config.routing_strategy.as_str())),
         ("proxy-url", value(config.proxy_url.as_str())),
@@ -1676,6 +1786,7 @@ pub(crate) fn write_gui_config_to_path(
             "routing-session-affinity-ttl",
             value(config.routing_session_affinity_ttl.as_str()),
         ),
+        ("disable-cooling", value(config.disable_cooling)),
         ("request-retry", value(i64::from(config.request_retry))),
         (
             "max-retry-credentials",
@@ -1813,6 +1924,9 @@ pub(crate) fn validate_gui_config(config: &GuiConfigFile) -> Result<(), String> 
         .any(char::is_control)
     {
         return Err("会话粘性 TTL 不能包含控制字符".to_string());
+    }
+    if !(1..=3600).contains(&config.redis_usage_queue_retention_seconds) {
+        return Err("Redis 用量队列保留时间必须在 1 到 3600 秒之间".to_string());
     }
     Ok(())
 }

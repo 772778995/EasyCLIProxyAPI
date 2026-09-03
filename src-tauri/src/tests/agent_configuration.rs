@@ -346,6 +346,52 @@ fn codex_oauth_configuration_uses_openai_auth_with_bearer_token() {
 }
 
 #[test]
+fn codex_oauth_configuration_is_preserved_for_legacy_updates() {
+    let home = agent_test_home("codex-oauth-preserved-update");
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    fs::write(
+        codex_dir.join("config.toml"),
+        "[model_providers.cpa-gui]\nrequires_openai_auth = true\n",
+    )
+    .unwrap();
+    fs::write(
+        codex_dir.join("auth.json"),
+        r#"{"tokens":{"access_token":"oauth-access-token"}}"#,
+    )
+    .unwrap();
+
+    let oauth_configuration = current_codex_oauth_configuration(&home).unwrap();
+    assert!(oauth_configuration);
+
+    let models = test_agent_models(&["gpt-test"]);
+    let catalog = test_codex_models(&["gpt-test"]);
+    let updates = build_agent_updates_with_oauth(
+        AgentClient::Codex,
+        &home,
+        8317,
+        DEFAULT_API_KEY,
+        "gpt-test",
+        AgentConfigurationOptions {
+            models: &models,
+            codex_catalog: Some(&catalog),
+            oauth_configuration,
+            claude_code_model_mappings: None,
+            claude_desktop_model_mappings: None,
+        },
+    )
+    .unwrap();
+
+    assert!(updates[0].after.contains("requires_openai_auth = true"));
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&updates[2].after).unwrap()["tokens"]
+            ["access_token"]
+            .is_string()
+    );
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
 fn codex_api_and_oauth_modes_write_the_same_catalog() {
     let home = agent_test_home("codex-auth-mode-catalog");
     fs::create_dir_all(home.join(".codex")).unwrap();
@@ -1675,6 +1721,104 @@ fn claude_desktop_aliases_support_codex_oauth_models() {
 }
 
 #[test]
+fn claude_desktop_aliases_support_claude_oauth_models() {
+    let input = "port: 8317\n";
+    let mappings = ClaudeDesktopModelMappings::all("claude-sonnet-4-6");
+    let available_models = test_agent_models(&["claude-sonnet-4-6"]);
+    let definitions = vec![OAuthModelDefinitions {
+        channel: oauth_alias_channel("claude").unwrap(),
+        models: vec![CodexModelDefinition {
+            id: "claude-sonnet-4-6".to_string(),
+            display_name: None,
+            description: None,
+            context_window: Some(200_000),
+            reasoning_levels: vec!["high".to_string()],
+            supports_tools: Some(true),
+        }],
+    }];
+
+    let rendered = ensure_claude_desktop_model_aliases_with_oauth_definitions_in_yaml(
+        input,
+        &mappings,
+        &available_models,
+        &definitions,
+    )
+    .unwrap();
+    let value: serde_norway::Value = serde_norway::from_str(&rendered).unwrap();
+    let root = value.as_mapping().unwrap();
+    let aliases = yaml_mapping_value(root, "oauth-model-alias")
+        .and_then(serde_norway::Value::as_mapping)
+        .and_then(|channels| yaml_mapping_value(channels, "claude"))
+        .and_then(serde_norway::Value::as_sequence)
+        .unwrap();
+
+    assert_eq!(aliases.len(), 3);
+    assert!(aliases.iter().all(|entry| {
+        configured_model_identity(entry).is_some_and(|(source, _, _)| source == "claude-sonnet-4-6")
+    }));
+    assert!(aliases.iter().all(|entry| {
+        entry
+            .as_mapping()
+            .and_then(|entry| yaml_mapping_value(entry, "fork"))
+            == Some(&serde_norway::Value::Bool(true))
+    }));
+    assert_eq!(
+        ensure_claude_desktop_model_aliases_with_oauth_definitions_in_yaml(
+            &rendered,
+            &mappings,
+            &available_models,
+            &definitions,
+        )
+        .unwrap(),
+        rendered
+    );
+}
+
+#[test]
+fn claude_desktop_aliases_support_xai_oauth_models() {
+    let input = "port: 8317\n";
+    let mappings = ClaudeDesktopModelMappings::all("grok-4");
+    let available_models = test_agent_models(&["grok-4"]);
+    let definitions = vec![OAuthModelDefinitions {
+        channel: oauth_alias_channel("xai").unwrap(),
+        models: vec![CodexModelDefinition {
+            id: "grok-4".to_string(),
+            display_name: None,
+            description: None,
+            context_window: Some(131_072),
+            reasoning_levels: vec!["high".to_string()],
+            supports_tools: Some(true),
+        }],
+    }];
+
+    let rendered = ensure_claude_desktop_model_aliases_with_oauth_definitions_in_yaml(
+        input,
+        &mappings,
+        &available_models,
+        &definitions,
+    )
+    .unwrap();
+    let value: serde_norway::Value = serde_norway::from_str(&rendered).unwrap();
+    let root = value.as_mapping().unwrap();
+    let aliases = yaml_mapping_value(root, "oauth-model-alias")
+        .and_then(serde_norway::Value::as_mapping)
+        .and_then(|channels| yaml_mapping_value(channels, "xai"))
+        .and_then(serde_norway::Value::as_sequence)
+        .unwrap();
+
+    assert_eq!(aliases.len(), 3);
+    assert!(aliases.iter().all(|entry| {
+        configured_model_identity(entry).is_some_and(|(source, _, _)| source == "grok-4")
+    }));
+    assert!(aliases.iter().all(|entry| {
+        entry
+            .as_mapping()
+            .and_then(|entry| yaml_mapping_value(entry, "fork"))
+            == Some(&serde_norway::Value::Bool(true))
+    }));
+}
+
+#[test]
 fn claude_oauth_alias_changes_use_the_runtime_refresh_endpoint() {
     let current = "port: 8317\nopenai-compatibility: []\n";
     let oauth_only = "port: 8317\nopenai-compatibility: []\noauth-model-alias:\n  codex:\n    - name: gpt-5.6-sol\n      alias: claude-opus-5\n      fork: true\n";
@@ -2116,7 +2260,7 @@ fn thinking_alias_prefers_codex_api_key_model_over_same_named_oauth_definition()
     ));
 
     let rendered =
-        add_model_alias_to_yaml(input, &sources[0], "gpt-5.6-luna-xhigh", "xhigh").unwrap();
+        add_model_alias_to_yaml(input, &sources[0], "gpt-5.6-luna-xhigh", "xhigh", false).unwrap();
     assert!(rendered.contains("alias: gpt-5.6-luna-xhigh"), "{rendered}");
     assert!(!rendered.contains("oauth-model-alias"), "{rendered}");
 }

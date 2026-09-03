@@ -140,7 +140,7 @@ pub(crate) async fn fetch_active_oauth_alias_channels(
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
-        .map_err(|error| format!("读取 OAuth 凭据来源失败: {error}"))?;
+        .map_err(|error| format_management_request_error("读取 OAuth 凭据来源失败", &error))?;
     let payload = read_management_value(response).await?;
     let files = payload
         .get("files")
@@ -218,7 +218,7 @@ pub(crate) async fn fetch_management_config_yaml(config: &GuiConfigFile) -> Resu
         )
         .send()
         .await
-        .map_err(|error| format!("读取内核 YAML 配置失败: {error}"))?;
+        .map_err(|error| format_management_request_error("读取内核 YAML 配置失败", &error))?;
     read_management_text(response).await
 }
 
@@ -234,7 +234,7 @@ pub(crate) async fn put_management_config_yaml(
         .body(content.to_string())
         .send()
         .await
-        .map_err(|error| format!("保存内核 YAML 配置失败: {error}"))?;
+        .map_err(|error| format_management_request_error("保存内核 YAML 配置失败", &error))?;
     read_management_value(response).await.map(|_| ())
 }
 
@@ -249,7 +249,7 @@ pub(crate) async fn put_management_oauth_model_aliases(
         .json(aliases)
         .send()
         .await
-        .map_err(|error| format!("保存 OAuth 模型别名失败: {error}"))?;
+        .map_err(|error| format_management_request_error("保存 OAuth 模型别名失败", &error))?;
     read_management_value(response).await.map(|_| ())
 }
 
@@ -319,11 +319,9 @@ pub(crate) async fn ensure_claude_desktop_model_aliases(
     let content = fetch_management_config_yaml(config).await?;
     let updated = match ensure_claude_desktop_model_aliases_in_yaml(&content, mappings, models) {
         Ok(updated) => updated,
-        Err(source_error) => {
-            let definitions = fetch_codex_model_definitions(config)
-                .await
-                .map_err(|error| format!("{source_error}；{error}"))?;
-            ensure_claude_desktop_model_aliases_with_codex_oauth_in_yaml(
+        Err(_) => {
+            let definitions = fetch_oauth_model_definitions(config).await;
+            ensure_claude_desktop_model_aliases_with_oauth_definitions_in_yaml(
                 &content,
                 mappings,
                 models,
@@ -348,6 +346,26 @@ pub(crate) fn ensure_claude_desktop_model_aliases_with_codex_oauth_in_yaml(
     models: &[AgentModelOption],
     codex_oauth_models: &[CodexModelDefinition],
 ) -> Result<String, String> {
+    let codex_channel = oauth_alias_channel("codex")
+        .ok_or_else(|| "缺少 Codex OAuth 别名 channel 定义".to_string())?;
+    let definitions = [OAuthModelDefinitions {
+        channel: codex_channel,
+        models: codex_oauth_models.to_vec(),
+    }];
+    ensure_claude_desktop_model_aliases_with_oauth_definitions_in_yaml(
+        content,
+        mappings,
+        models,
+        &definitions,
+    )
+}
+
+pub(crate) fn ensure_claude_desktop_model_aliases_with_oauth_definitions_in_yaml(
+    content: &str,
+    mappings: &ClaudeDesktopModelMappings,
+    models: &[AgentModelOption],
+    oauth_model_definitions: &[OAuthModelDefinitions],
+) -> Result<String, String> {
     let mut document = yaml_serde_edit::YamlValue::parse(content)
         .map_err(|error| format!("解析内核 YAML 配置失败: {error}"))?;
     let mut updated = document.get().clone();
@@ -368,7 +386,7 @@ pub(crate) fn ensure_claude_desktop_model_aliases_with_codex_oauth_in_yaml(
                 remove_managed_claude_model_alias(root, alias)?;
             }
         } else {
-            ensure_claude_desktop_model_alias(root, source_model, alias, codex_oauth_models)?;
+            ensure_claude_desktop_model_alias(root, source_model, alias, oauth_model_definitions)?;
         }
     }
     render_updated_core_yaml(&mut document, updated)
@@ -559,7 +577,7 @@ pub(crate) fn ensure_claude_desktop_model_alias(
     root: &mut serde_norway::Mapping,
     source_model: &str,
     alias: &str,
-    codex_oauth_models: &[CodexModelDefinition],
+    oauth_model_definitions: &[OAuthModelDefinitions],
 ) -> Result<(), String> {
     if let Some((existing_source, _)) = configured_model_client_identity(root, alias) {
         if existing_source.eq_ignore_ascii_case(source_model)
@@ -572,11 +590,19 @@ pub(crate) fn ensure_claude_desktop_model_alias(
     if append_claude_desktop_model_alias(root, source_model, alias)? {
         return Ok(());
     }
-    if codex_oauth_models
-        .iter()
-        .any(|model| model.id.eq_ignore_ascii_case(source_model))
-    {
-        append_managed_codex_oauth_model_alias(root, source_model, alias)?;
+    if let Some(definition) = oauth_model_definitions.iter().find(|definition| {
+        definition
+            .models
+            .iter()
+            .any(|model| model.id.eq_ignore_ascii_case(source_model))
+    }) {
+        append_managed_oauth_model_alias(
+            root,
+            definition.channel.key,
+            source_model,
+            alias,
+            definition.channel.force_mapping,
+        )?;
         return Ok(());
     }
     Err(format!(
@@ -695,21 +721,23 @@ pub(crate) fn append_claude_desktop_model_alias(
     Ok(false)
 }
 
-pub(crate) fn append_managed_codex_oauth_model_alias(
+pub(crate) fn append_managed_oauth_model_alias(
     root: &mut serde_norway::Mapping,
+    channel: &str,
     source_model: &str,
     alias: &str,
+    force_mapping: bool,
 ) -> Result<(), String> {
     let oauth_aliases = root
         .entry(yaml_key("oauth-model-alias"))
         .or_insert_with(|| serde_norway::Value::Mapping(serde_norway::Mapping::new()))
         .as_mapping_mut()
         .ok_or_else(|| "oauth-model-alias 必须是 YAML 映射".to_string())?;
-    let codex_aliases = oauth_aliases
-        .entry(yaml_key("codex"))
+    let channel_aliases = oauth_aliases
+        .entry(yaml_key(channel))
         .or_insert_with(|| serde_norway::Value::Sequence(Vec::new()))
         .as_sequence_mut()
-        .ok_or_else(|| "oauth-model-alias.codex 必须是数组".to_string())?;
+        .ok_or_else(|| format!("oauth-model-alias.{channel} 必须是数组"))?;
     let display_name = managed_claude_alias_display_name(alias)
         .ok_or_else(|| format!("不支持的 Claude 托管别名: {alias}"))?;
     let mut alias_mapping = serde_norway::Mapping::new();
@@ -722,18 +750,15 @@ pub(crate) fn append_managed_codex_oauth_model_alias(
         serde_norway::Value::String(alias.to_string()),
     );
     alias_mapping.insert(yaml_key("fork"), serde_norway::Value::Bool(true));
+    if force_mapping {
+        alias_mapping.insert(yaml_key("force-mapping"), serde_norway::Value::Bool(true));
+    }
     alias_mapping.insert(
         yaml_key("display-name"),
         serde_norway::Value::String(display_name.to_string()),
     );
-    codex_aliases.push(serde_norway::Value::Mapping(alias_mapping));
+    channel_aliases.push(serde_norway::Value::Mapping(alias_mapping));
     Ok(())
-}
-
-pub(crate) async fn fetch_codex_model_definitions(
-    config: &GuiConfigFile,
-) -> Result<Vec<CodexModelDefinition>, String> {
-    fetch_oauth_channel_model_definitions(config, "codex").await
 }
 
 pub(crate) async fn fetch_oauth_channel_model_definitions(
@@ -750,7 +775,9 @@ pub(crate) async fn fetch_oauth_channel_model_definitions(
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
-        .map_err(|error| format!("读取 {channel} OAuth 模型定义失败: {error}"))?;
+        .map_err(|error| {
+            format_management_request_error(&format!("读取 {channel} OAuth 模型定义失败"), &error)
+        })?;
     let payload = read_management_value(response).await?;
     parse_codex_model_definitions(&payload)
 }
@@ -895,9 +922,7 @@ pub(crate) fn resolved_oauth_alias_sources(
         AliasSourceCapability::Reasoning => {
             sources.retain(|source| !source.source.reasoning_levels.is_empty())
         }
-        AliasSourceCapability::Fast => {
-            sources.retain(|source| model_supports_fast(&source.source.model))
-        }
+        AliasSourceCapability::Fast => sources.retain(alias_source_supports_fast),
         AliasSourceCapability::Base => {}
     }
     let configured_codex_api_models = sources
@@ -922,8 +947,6 @@ pub(crate) fn resolved_oauth_alias_sources(
                 .filter(|definition| {
                     (capability != AliasSourceCapability::Reasoning
                         || !definition.reasoning_levels.is_empty())
-                        && (capability != AliasSourceCapability::Fast
-                            || model_supports_fast(&definition.id))
                         && thinking_alias_model_is_available(available_models, &definition.id)
                         && (channel.key != "codex"
                             || !configured_codex_api_models
@@ -958,19 +981,13 @@ pub(crate) fn thinking_alias_model_is_available(
         .any(|available| available.name.eq_ignore_ascii_case(model))
 }
 
-pub(crate) fn model_supports_fast(model: &str) -> bool {
-    let model = model.trim().to_ascii_lowercase();
-    model == "gpt" || model.starts_with("gpt-")
-}
-
 pub(crate) fn alias_source_supports_fast(source: &ResolvedThinkingAliasSource) -> bool {
-    model_supports_fast(&source.source.model)
-        && match &source.location {
-            ThinkingAliasSourceLocation::Oauth { channel, .. } => *channel == "codex",
-            ThinkingAliasSourceLocation::ConfigModel { section, .. } => {
-                matches!(*section, "codex-api-key" | "openai-compatibility")
-            }
+    match &source.location {
+        ThinkingAliasSourceLocation::Oauth { channel, .. } => *channel == "codex",
+        ThinkingAliasSourceLocation::ConfigModel { section, .. } => {
+            matches!(*section, "codex-api-key" | "openai-compatibility")
         }
+    }
 }
 
 pub(crate) fn collect_config_thinking_alias_sources(
@@ -1607,7 +1624,11 @@ pub(crate) fn add_model_alias_to_yaml(
     source: &ResolvedThinkingAliasSource,
     alias: &str,
     effort: &str,
+    fast: bool,
 ) -> Result<String, String> {
+    if fast && !alias_source_supports_fast(source) {
+        return Err("Fast 仅支持 OpenAI 兼容 API、Codex API 或 Codex OAuth 模型源".to_string());
+    }
     let mut document = yaml_serde_edit::YamlValue::parse(content)
         .map_err(|error| format!("解析内核 YAML 配置失败: {error}"))?;
     let mut updated = document.get().clone();
@@ -1640,8 +1661,32 @@ pub(crate) fn add_model_alias_to_yaml(
     }
 
     remove_thinking_payload_model(root, alias)?;
-    if effort.is_empty() {
-        return render_updated_core_yaml(&mut document, updated);
+    remove_speed_payload_model(root, alias)?;
+    if !effort.is_empty() {
+        let mut params_mapping = serde_norway::Mapping::new();
+        insert_thinking_effort_params(&mut params_mapping, &source.source, effort)?;
+        append_alias_payload_override(root, alias, &source.source.protocol, params_mapping)?;
+    }
+    if fast {
+        let mut params_mapping = serde_norway::Mapping::new();
+        params_mapping.insert(
+            yaml_key("service_tier"),
+            serde_norway::Value::String("priority".to_string()),
+        );
+        append_alias_payload_override(root, alias, &source.source.protocol, params_mapping)?;
+    }
+
+    render_updated_core_yaml(&mut document, updated)
+}
+
+pub(crate) fn append_alias_payload_override(
+    root: &mut serde_norway::Mapping,
+    alias: &str,
+    protocol: &str,
+    params_mapping: serde_norway::Mapping,
+) -> Result<(), String> {
+    if params_mapping.is_empty() {
+        return Ok(());
     }
     let payload = root
         .entry(yaml_key("payload"))
@@ -1661,12 +1706,8 @@ pub(crate) fn add_model_alias_to_yaml(
     );
     model_mapping.insert(
         yaml_key("protocol"),
-        serde_norway::Value::String(source.source.protocol.clone()),
+        serde_norway::Value::String(protocol.to_string()),
     );
-    let mut params_mapping = serde_norway::Mapping::new();
-    if !effort.is_empty() {
-        insert_thinking_effort_params(&mut params_mapping, &source.source, effort)?;
-    }
     let mut rule_mapping = serde_norway::Mapping::new();
     rule_mapping.insert(
         yaml_key("models"),
@@ -1677,8 +1718,7 @@ pub(crate) fn add_model_alias_to_yaml(
         serde_norway::Value::Mapping(params_mapping),
     );
     override_rules.push(serde_norway::Value::Mapping(rule_mapping));
-
-    render_updated_core_yaml(&mut document, updated)
+    Ok(())
 }
 
 pub(crate) fn add_speed_alias_to_yaml(
@@ -1687,9 +1727,7 @@ pub(crate) fn add_speed_alias_to_yaml(
     alias: &str,
 ) -> Result<String, String> {
     if !alias_source_supports_fast(source) {
-        return Err(
-            "Fast 仅支持 OpenAI 兼容 API、Codex API 或 Codex OAuth 的 GPT 系列模型".to_string(),
-        );
+        return Err("Fast 仅支持 OpenAI 兼容 API、Codex API 或 Codex OAuth 模型源".to_string());
     }
     let mut document = yaml_serde_edit::YamlValue::parse(content)
         .map_err(|error| format!("解析内核 YAML 配置失败: {error}"))?;
@@ -1722,41 +1760,12 @@ pub(crate) fn add_speed_alias_to_yaml(
     }
 
     remove_speed_payload_model(root, alias)?;
-    let payload = root
-        .entry(yaml_key("payload"))
-        .or_insert_with(|| serde_norway::Value::Mapping(serde_norway::Mapping::new()))
-        .as_mapping_mut()
-        .ok_or_else(|| "payload 必须是 YAML 映射".to_string())?;
-    let override_rules = payload
-        .entry(yaml_key("override"))
-        .or_insert_with(|| serde_norway::Value::Sequence(Vec::new()))
-        .as_sequence_mut()
-        .ok_or_else(|| "payload.override 必须是数组".to_string())?;
-
-    let mut model_mapping = serde_norway::Mapping::new();
-    model_mapping.insert(
-        yaml_key("name"),
-        serde_norway::Value::String(alias.to_string()),
-    );
-    model_mapping.insert(
-        yaml_key("protocol"),
-        serde_norway::Value::String(source.source.protocol.clone()),
-    );
     let mut params_mapping = serde_norway::Mapping::new();
     params_mapping.insert(
         yaml_key("service_tier"),
         serde_norway::Value::String("priority".to_string()),
     );
-    let mut rule_mapping = serde_norway::Mapping::new();
-    rule_mapping.insert(
-        yaml_key("models"),
-        serde_norway::Value::Sequence(vec![serde_norway::Value::Mapping(model_mapping)]),
-    );
-    rule_mapping.insert(
-        yaml_key("params"),
-        serde_norway::Value::Mapping(params_mapping),
-    );
-    override_rules.push(serde_norway::Value::Mapping(rule_mapping));
+    append_alias_payload_override(root, alias, &source.source.protocol, params_mapping)?;
 
     render_updated_core_yaml(&mut document, updated)
 }

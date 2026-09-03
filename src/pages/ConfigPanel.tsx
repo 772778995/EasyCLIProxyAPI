@@ -4,12 +4,17 @@ import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
   AlertCircle,
+  Bug,
   Check,
   Copy,
   Clock3,
+  Database,
   Eye,
   EyeOff,
+  FileText,
   FolderOpen,
+  Gauge,
+  HardDrive,
   KeyRound,
   Link2,
   LockKeyhole,
@@ -33,7 +38,13 @@ import { ThinkingAliasesPage } from './ThinkingAliasesPage';
 
 type CoreConfigSettings = {
   apiKeys: CoreApiKey[];
-  managementSecretConfigured: boolean;
+  debug: boolean;
+  commercialMode: boolean;
+  loggingToFile: boolean;
+  logsMaxTotalSizeMb: number;
+  errorLogsMaxFiles: number;
+  usageStatisticsEnabled: boolean;
+  redisUsageQueueRetentionSeconds: number;
   host: string;
   port: number;
   allowLan: boolean;
@@ -41,6 +52,7 @@ type CoreConfigSettings = {
   proxyUrl: string;
   routingSessionAffinity: boolean;
   routingSessionAffinityTtl: string;
+  disableCooling: boolean;
   requestRetry: number;
   maxRetryCredentials: number;
   maxRetryInterval: number;
@@ -57,6 +69,8 @@ type ConfigAction =
   | 'update-key'
   | 'delete-key'
   | 'management-secret'
+  | 'logging'
+  | 'open-logs'
   | 'routing'
   | 'network'
   | 'retry'
@@ -72,6 +86,7 @@ type NetworkDraftField =
   | 'proxyUrl'
   | 'sessionAffinity'
   | 'sessionTtl'
+  | 'disableCooling'
   | 'requestRetry'
   | 'maxRetryCredentials'
   | 'maxRetryInterval'
@@ -106,6 +121,7 @@ const cleanNetworkDraft = (): NetworkDraftDirty => ({
   proxyUrl: false,
   sessionAffinity: false,
   sessionTtl: false,
+  disableCooling: false,
   requestRetry: false,
   maxRetryCredentials: false,
   maxRetryInterval: false,
@@ -151,6 +167,14 @@ export function ConfigPanelPage() {
   const [managementSecretConfirm, setManagementSecretConfirm] = useState('');
   const [showManagementSecret, setShowManagementSecret] = useState(false);
   const [managementSecretError, setManagementSecretError] = useState('');
+  const [debugDraft, setDebugDraft] = useState(false);
+  const [commercialModeDraft, setCommercialModeDraft] = useState(false);
+  const [loggingToFileDraft, setLoggingToFileDraft] = useState(false);
+  const [logsMaxTotalSizeDraft, setLogsMaxTotalSizeDraft] = useState('0');
+  const [errorLogsMaxFilesDraft, setErrorLogsMaxFilesDraft] = useState('10');
+  const [usageStatisticsDraft, setUsageStatisticsDraft] = useState(true);
+  const [redisUsageRetentionDraft, setRedisUsageRetentionDraft] = useState('60');
+  const [loggingError, setLoggingError] = useState('');
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [notice, setNotice] = useState<{ message: string; tone: NoticeTone } | null>(null);
   const [activeSubpage, setActiveSubpage] = useState<ConfigSubpage>('general');
@@ -159,6 +183,7 @@ export function ConfigPanelPage() {
   const [proxyUrlDraft, setProxyUrlDraft] = useState('');
   const [sessionAffinityDraft, setSessionAffinityDraft] = useState(false);
   const [sessionTtlDraft, setSessionTtlDraft] = useState('');
+  const [disableCoolingDraft, setDisableCoolingDraft] = useState(false);
   const [requestRetryDraft, setRequestRetryDraft] = useState('3');
   const [maxRetryCredentialsDraft, setMaxRetryCredentialsDraft] = useState('0');
   const [maxRetryIntervalDraft, setMaxRetryIntervalDraft] = useState('30');
@@ -167,6 +192,7 @@ export function ConfigPanelPage() {
   const [hostError, setHostError] = useState('');
   const [retryError, setRetryError] = useState('');
   const networkDraftDirtyRef = useRef<NetworkDraftDirty>(cleanNetworkDraft());
+  const loggingDraftDirtyRef = useRef(false);
   const noticeTimerRef = useRef<number | null>(null);
   const copyTimerRef = useRef<number | null>(null);
 
@@ -218,27 +244,52 @@ export function ConfigPanelPage() {
       if (!dirty.proxyUrl) setProxyUrlDraft(result.proxyUrl);
       if (!dirty.sessionAffinity) setSessionAffinityDraft(result.routingSessionAffinity);
       if (!dirty.sessionTtl) setSessionTtlDraft(result.routingSessionAffinityTtl);
+      if (!dirty.disableCooling) setDisableCoolingDraft(result.disableCooling);
       if (!dirty.requestRetry) setRequestRetryDraft(String(result.requestRetry));
       if (!dirty.maxRetryCredentials) setMaxRetryCredentialsDraft(String(result.maxRetryCredentials));
       if (!dirty.maxRetryInterval) setMaxRetryIntervalDraft(String(result.maxRetryInterval));
       if (!dirty.streamingBootstrapRetries) {
         setStreamingBootstrapRetriesDraft(String(result.streamingBootstrapRetries));
       }
+      if (!loggingDraftDirtyRef.current) {
+        setDebugDraft(result.debug);
+        setCommercialModeDraft(result.commercialMode);
+        setLoggingToFileDraft(result.loggingToFile);
+        setLogsMaxTotalSizeDraft(String(result.logsMaxTotalSizeMb));
+        setErrorLogsMaxFilesDraft(String(result.errorLogsMaxFiles));
+        setUsageStatisticsDraft(result.usageStatisticsEnabled);
+        setRedisUsageRetentionDraft(String(result.redisUsageQueueRetentionSeconds));
+      }
       return;
     }
     networkDraftDirtyRef.current = cleanNetworkDraft();
+    loggingDraftDirtyRef.current = false;
     setPortDraft(String(result.port));
     setHostDraft(result.host);
     setProxyUrlDraft(result.proxyUrl);
     setSessionAffinityDraft(result.routingSessionAffinity);
     setSessionTtlDraft(result.routingSessionAffinityTtl);
+    setDisableCoolingDraft(result.disableCooling);
     setRequestRetryDraft(String(result.requestRetry));
     setMaxRetryCredentialsDraft(String(result.maxRetryCredentials));
     setMaxRetryIntervalDraft(String(result.maxRetryInterval));
     setStreamingBootstrapRetriesDraft(String(result.streamingBootstrapRetries));
+    setDebugDraft(result.debug);
+    setCommercialModeDraft(result.commercialMode);
+    setLoggingToFileDraft(result.loggingToFile);
+    setLogsMaxTotalSizeDraft(String(result.logsMaxTotalSizeMb));
+    setErrorLogsMaxFilesDraft(String(result.errorLogsMaxFiles));
+    setUsageStatisticsDraft(result.usageStatisticsEnabled);
+    setRedisUsageRetentionDraft(String(result.redisUsageQueueRetentionSeconds));
     setPortError('');
     setHostError('');
     setRetryError('');
+    setLoggingError('');
+  };
+
+  const markLoggingDraftDirty = () => {
+    loggingDraftDirtyRef.current = true;
+    setLoggingError('');
   };
 
   const markDraftDirty = (field: NetworkDraftField) => {
@@ -440,6 +491,82 @@ export function ConfigPanelPage() {
       setEditingApiKey(null);
       setNewApiKey('');
       setNewApiKeyRemark('');
+    }
+  };
+
+  const saveCoreLoggingSettings = async () => {
+    if (!settings || busyAction !== null) return;
+    const logsMaxTotalSizeMb = Number(logsMaxTotalSizeDraft);
+    const errorLogsMaxFiles = Number(errorLogsMaxFilesDraft);
+    const redisUsageQueueRetentionSeconds = Number(redisUsageRetentionDraft);
+    if (
+      !Number.isInteger(logsMaxTotalSizeMb)
+      || logsMaxTotalSizeMb < 0
+      || logsMaxTotalSizeMb > 4294967295
+      || !Number.isInteger(errorLogsMaxFiles)
+      || errorLogsMaxFiles < 0
+      || errorLogsMaxFiles > 4294967295
+    ) {
+      const message = t('config.diagnostics.error.nonNegativeInteger');
+      setLoggingError(message);
+      showNotice(message, 'error');
+      return;
+    }
+    if (
+      !Number.isInteger(redisUsageQueueRetentionSeconds)
+      || redisUsageQueueRetentionSeconds < 1
+      || redisUsageQueueRetentionSeconds > 3600
+    ) {
+      const message = t('config.diagnostics.error.redisRetention');
+      setLoggingError(message);
+      showNotice(message, 'error');
+      return;
+    }
+
+    const commercialModeChanged = commercialModeDraft !== settings.commercialMode;
+    setBusyAction('logging');
+    setLoggingError('');
+    try {
+      const result = await invoke<CoreConfigSettings>('save_core_logging_settings', {
+        settings: {
+          debug: debugDraft,
+          commercialMode: commercialModeDraft,
+          loggingToFile: loggingToFileDraft,
+          logsMaxTotalSizeMb,
+          errorLogsMaxFiles,
+          usageStatisticsEnabled: usageStatisticsDraft,
+          redisUsageQueueRetentionSeconds,
+        },
+      });
+      loggingDraftDirtyRef.current = false;
+      applySettings(result, 'preserve');
+      if (commercialModeChanged && coreStatus?.running) {
+        const status = await invoke<CoreStatus>('restart_core_process');
+        publishStatus(status);
+        showNotice(t('config.diagnostics.notice.savedAndRestarted'), 'success');
+      } else {
+        showNotice(t('config.diagnostics.notice.saved'), 'success');
+      }
+    } catch (error) {
+      const message = t('config.error.saveFailed', { error: String(error) });
+      setLoggingError(message);
+      showNotice(message, 'error');
+      void refreshStatus();
+      void loadSettings('preserve');
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const openCoreLogsDirectory = async () => {
+    if (busyAction !== null) return;
+    setBusyAction('open-logs');
+    try {
+      await invoke<void>('open_core_logs_directory');
+    } catch (error) {
+      showNotice(t('config.diagnostics.error.openLogs', { error: String(error) }), 'error');
+    } finally {
+      setBusyAction(null);
     }
   };
 
@@ -648,12 +775,14 @@ export function ConfigPanelPage() {
     try {
       const result = await invoke<CoreConfigSettings>('save_retry_settings', {
         settings: {
+          disableCooling: disableCoolingDraft,
           requestRetry,
           maxRetryCredentials,
           maxRetryInterval,
           streamingBootstrapRetries,
         },
       });
+      clearDraftDirty('disableCooling');
       clearDraftDirty('requestRetry');
       clearDraftDirty('maxRetryCredentials');
       clearDraftDirty('maxRetryInterval');
@@ -747,10 +876,20 @@ export function ConfigPanelPage() {
     || sessionTtlDraft.trim() !== settings?.routingSessionAffinityTtl
   );
   const retrySettingsDirty = Boolean(settings) && (
-    requestRetryDraft !== String(settings?.requestRetry)
+    disableCoolingDraft !== settings?.disableCooling
+    || requestRetryDraft !== String(settings?.requestRetry)
     || maxRetryCredentialsDraft !== String(settings?.maxRetryCredentials)
     || maxRetryIntervalDraft !== String(settings?.maxRetryInterval)
     || streamingBootstrapRetriesDraft !== String(settings?.streamingBootstrapRetries)
+  );
+  const loggingSettingsDirty = Boolean(settings) && (
+    debugDraft !== settings?.debug
+    || commercialModeDraft !== settings?.commercialMode
+    || loggingToFileDraft !== settings?.loggingToFile
+    || logsMaxTotalSizeDraft !== String(settings?.logsMaxTotalSizeMb)
+    || errorLogsMaxFilesDraft !== String(settings?.errorLogsMaxFiles)
+    || usageStatisticsDraft !== settings?.usageStatisticsEnabled
+    || redisUsageRetentionDraft !== String(settings?.redisUsageQueueRetentionSeconds)
   );
   const softwareCloseBehaviorDirty = softwareSettings !== null
     && softwareCloseBehaviorDraft !== softwareSettings.closeBehavior;
@@ -803,6 +942,7 @@ export function ConfigPanelPage() {
   const deletingLastKey = deleteIndex !== null && settings?.apiKeys.length === 1;
   const keyMutationBusy = busyAction === 'add-key' || busyAction === 'update-key';
   const managementSecretBusy = busyAction === 'management-secret';
+  const loggingSettingsBusy = busyAction === 'logging';
 
   return (
     <section className="page config-page">
@@ -871,7 +1011,7 @@ export function ConfigPanelPage() {
 
       {activeSubpage === 'general' ? (
         <div
-          className="config-subpage-panel"
+          className="config-subpage-panel config-general-subpage"
           id="config-subpage-panel-general"
           role="tabpanel"
           aria-labelledby="config-subpage-tab-general"
@@ -984,15 +1124,6 @@ export function ConfigPanelPage() {
               <h2>{t('config.webuiKey.title')}</h2>
             </div>
             <div className="config-heading-actions">
-              {!loading && settings ? (
-                <span
-                  className={`state-pill ${settings.managementSecretConfigured ? 'success' : ''}`}
-                >
-                  {settings.managementSecretConfigured
-                    ? t('config.webuiKey.configured')
-                    : t('config.webuiKey.unconfigured')}
-                </span>
-              ) : null}
               <button
                 type="button"
                 className="secondary-button compact-button"
@@ -1094,6 +1225,188 @@ export function ConfigPanelPage() {
                 </div>
               </div>
             </form>
+          </div>
+        </section>
+
+        <section className="panel config-diagnostics-panel">
+          <div className="config-panel-heading">
+            <div className="config-heading-title">
+              <FileText size={18} aria-hidden="true" />
+              <h2>{t('config.diagnostics.title')}</h2>
+            </div>
+          </div>
+
+          <p className="config-diagnostics-intro">{t('config.diagnostics.description')}</p>
+
+          <div className="config-diagnostics-toggle-grid">
+            <div className="config-diagnostics-setting">
+              <span className="config-diagnostics-setting-icon" aria-hidden="true"><Bug size={18} /></span>
+              <div className="config-diagnostics-setting-copy">
+                <strong>{t('config.diagnostics.debug.title')}</strong>
+                <small>{t('config.diagnostics.debug.description')}</small>
+              </div>
+              <label className="switch-control" title={t('config.diagnostics.debug.title')}>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={debugDraft}
+                  disabled={controlsDisabled}
+                  onChange={(event) => {
+                    setDebugDraft(event.currentTarget.checked);
+                    markLoggingDraftDirty();
+                  }}
+                />
+                <span className="switch-track" />
+              </label>
+            </div>
+
+            <div className="config-diagnostics-setting">
+              <span className="config-diagnostics-setting-icon" aria-hidden="true"><Gauge size={18} /></span>
+              <div className="config-diagnostics-setting-copy">
+                <strong>{t('config.diagnostics.commercial.title')}</strong>
+                <small>{t('config.diagnostics.commercial.description')}</small>
+              </div>
+              <label className="switch-control" title={t('config.diagnostics.commercial.title')}>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={commercialModeDraft}
+                  disabled={controlsDisabled}
+                  onChange={(event) => {
+                    setCommercialModeDraft(event.currentTarget.checked);
+                    markLoggingDraftDirty();
+                  }}
+                />
+                <span className="switch-track" />
+              </label>
+            </div>
+
+            <div className="config-diagnostics-setting">
+              <span className="config-diagnostics-setting-icon" aria-hidden="true"><HardDrive size={18} /></span>
+              <div className="config-diagnostics-setting-copy">
+                <strong>{t('config.diagnostics.fileLogging.title')}</strong>
+                <small>{t('config.diagnostics.fileLogging.description')}</small>
+              </div>
+              <label className="switch-control" title={t('config.diagnostics.fileLogging.title')}>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={loggingToFileDraft}
+                  disabled={controlsDisabled}
+                  onChange={(event) => {
+                    setLoggingToFileDraft(event.currentTarget.checked);
+                    markLoggingDraftDirty();
+                  }}
+                />
+                <span className="switch-track" />
+              </label>
+            </div>
+
+            <div className="config-diagnostics-setting">
+              <span className="config-diagnostics-setting-icon" aria-hidden="true"><Database size={18} /></span>
+              <div className="config-diagnostics-setting-copy">
+                <strong>{t('config.diagnostics.usage.title')}</strong>
+                <small>{t('config.diagnostics.usage.description')}</small>
+              </div>
+              <label className="switch-control" title={t('config.diagnostics.usage.title')}>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={usageStatisticsDraft}
+                  disabled={controlsDisabled}
+                  onChange={(event) => {
+                    setUsageStatisticsDraft(event.currentTarget.checked);
+                    markLoggingDraftDirty();
+                  }}
+                />
+                <span className="switch-track" />
+              </label>
+            </div>
+          </div>
+
+          <div className="config-diagnostics-fields">
+            <label className="config-diagnostics-field">
+              <span>{t('config.diagnostics.maxSize.title')}</span>
+              <input
+                className="config-dialog-text-input"
+                type="number"
+                min="0"
+                step="1"
+                value={logsMaxTotalSizeDraft}
+                disabled={controlsDisabled}
+                onChange={(event) => {
+                  setLogsMaxTotalSizeDraft(event.currentTarget.value);
+                  markLoggingDraftDirty();
+                }}
+              />
+              <small>{t('config.diagnostics.maxSize.hint')}</small>
+            </label>
+            <label className="config-diagnostics-field">
+              <span>{t('config.diagnostics.errorFiles.title')}</span>
+              <input
+                className="config-dialog-text-input"
+                type="number"
+                min="0"
+                step="1"
+                value={errorLogsMaxFilesDraft}
+                disabled={controlsDisabled}
+                onChange={(event) => {
+                  setErrorLogsMaxFilesDraft(event.currentTarget.value);
+                  markLoggingDraftDirty();
+                }}
+              />
+              <small>{t('config.diagnostics.errorFiles.hint')}</small>
+            </label>
+            <label className="config-diagnostics-field">
+              <span>{t('config.diagnostics.redisRetention.title')}</span>
+              <input
+                className="config-dialog-text-input"
+                type="number"
+                min="1"
+                max="3600"
+                step="1"
+                value={redisUsageRetentionDraft}
+                disabled={controlsDisabled}
+                onChange={(event) => {
+                  setRedisUsageRetentionDraft(event.currentTarget.value);
+                  markLoggingDraftDirty();
+                }}
+              />
+              <small>{t('config.diagnostics.redisRetention.hint')}</small>
+            </label>
+          </div>
+
+          {commercialModeDraft ? (
+            <div className="config-diagnostics-commercial-note">
+              <AlertCircle size={16} aria-hidden="true" />
+              <span>{t('config.diagnostics.commercial.warning')}</span>
+            </div>
+          ) : null}
+
+          <div className="config-diagnostics-footer">
+            <span className={`config-form-message ${loggingError ? 'error' : ''}`} role="alert">
+              {loggingError || ' '}
+            </span>
+            <div className="config-diagnostics-actions">
+              <button
+                type="button"
+                className="secondary-button compact-button"
+                disabled={controlsDisabled}
+                onClick={() => void openCoreLogsDirectory()}
+              >
+                <FolderOpen size={16} aria-hidden="true" />
+                {t('config.diagnostics.openLogs')}
+              </button>
+              <button
+                type="button"
+                className="primary-button compact-button"
+                disabled={controlsDisabled || !loggingSettingsDirty}
+                onClick={() => void saveCoreLoggingSettings()}
+              >
+                <Check size={16} aria-hidden="true" />
+                {loggingSettingsBusy ? t('common.saving') : t('config.diagnostics.save')}
+              </button>
+            </div>
           </div>
         </section>
         </div>
@@ -1330,6 +1643,27 @@ export function ConfigPanelPage() {
               </button>
             </div>
             <div className="config-network-grid">
+              <div className="config-network-field config-network-toggle">
+                <div>
+                  <span>{t('config.network.disableCooling')}</span>
+                  <small>{t('config.network.disableCoolingHint')}</small>
+                </div>
+                <label className="switch-control" title={t('config.network.disableCooling')}>
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    aria-label={t('config.network.disableCooling')}
+                    checked={disableCoolingDraft}
+                    disabled={controlsDisabled}
+                    onChange={(event) => {
+                      markDraftDirty('disableCooling');
+                      setDisableCoolingDraft(event.currentTarget.checked);
+                    }}
+                  />
+                  <span className="switch-track" />
+                </label>
+              </div>
+
               <label className="config-network-field">
                 <span>{t('config.network.requestRetry')}</span>
                 <input

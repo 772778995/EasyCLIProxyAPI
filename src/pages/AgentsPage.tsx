@@ -169,6 +169,7 @@ const createClaudeBooleanByClient = (): Record<ClaudeModelMappingClientId, boole
 let claudeModelMappingsDraftCache = createClaudeModelMappingsByClient();
 let claudeCustomMappingCache = createClaudeBooleanByClient();
 const claudeModelMappingsDirtyCache = createClaudeBooleanByClient();
+let codexOauthConfigurationDraftCache: boolean | null = null;
 
 const claudeMappingRoles = [
   {
@@ -629,7 +630,12 @@ function AgentModelPicker({
   );
 }
 
-export function AgentsPage() {
+type AgentsPageProps = {
+  embedded?: boolean;
+  onConfigurationApplied?: () => void;
+};
+
+export function AgentsPage({ embedded = false, onConfigurationApplied }: AgentsPageProps = {}) {
   const { t } = useI18n();
   const [selected, setSelected] = useState<AgentClientId>(readSelectedAgentClient);
   const [activeSubpage, setActiveSubpage] = useState<AgentSubpageId>(DEFAULT_AGENT_SUBPAGE);
@@ -671,7 +677,9 @@ export function AgentsPage() {
     readAgentLaunchDirectoryHistory,
   );
   const [oauthLoginRequiredAction, setOauthLoginRequiredAction] = useState<OAuthLoginRequiredAction | null>(null);
-  const [oauthConfigurationDraft, setOauthConfigurationDraft] = useState<boolean | null>(null);
+  const [oauthConfigurationDraft, setOauthConfigurationDraftState] = useState<boolean | null>(
+    () => codexOauthConfigurationDraftCache,
+  );
   const [piProviderUpdateStatus, setPiProviderUpdateStatus] = useState<PiProviderUpdateStatus | null>(null);
   const modelRequestRef = useRef(0);
   const piUpdateRequestRef = useRef(0);
@@ -699,6 +707,11 @@ export function AgentsPage() {
       claudeCustomMappingCache = next;
       return next;
     });
+  }, []);
+
+  const setOauthConfigurationDraft = useCallback((value: boolean | null) => {
+    codexOauthConfigurationDraftCache = value;
+    setOauthConfigurationDraftState(value);
   }, []);
 
   const loadStatuses = useCallback(async (forceRefresh = false) => {
@@ -798,9 +811,8 @@ export function AgentsPage() {
     setLaunchDirectoryTarget(null);
     setLaunchDirectoryError('');
     setOauthLoginRequiredAction(null);
-    setOauthConfigurationDraft(null);
-    // Preserve each Claude client's unsaved draft while navigating between clients.
-    // Its dirty flag is cleared only after a successful apply, close, or reset action.
+    // Preserve unsaved client-specific configuration while navigating between clients.
+    // Each configuration action decides whether its draft should be retained or cleared.
   }, [selected]);
 
   const activeDefinition = agentDefinitions.find((agent) => agent.id === selected)
@@ -982,6 +994,16 @@ export function AgentsPage() {
     void loadModels(selected);
   };
 
+  const runEmbeddedPrimaryAction = () => {
+    if (isPiClient) {
+      void (activeStatus?.pluginInstalled ? repairPiProvider() : installPiProvider());
+      return;
+    }
+    void (configurationAction === 'close'
+      ? closeConfigurationChanges()
+      : applyConfigurationChanges());
+  };
+
   const reloadStatusesAfterAction = async () => {
     setDetectionError('');
     try {
@@ -1000,6 +1022,24 @@ export function AgentsPage() {
       writeAgentModelSelections(next);
       return next;
     });
+  };
+
+  const selectEmbeddedModel = (value: string) => {
+    const model = findAgentModel(models, value);
+    if (!model) return;
+    if (isClaudeModelMappingClient) {
+      claudeModelMappingsDirtyRef.current[selected] = true;
+      setClaudeModelMappingsDraftByClient((current) => ({
+        ...current,
+        [selected]: {
+          ...current[selected],
+          opus: model.name,
+          sonnet: model.name,
+          haiku: model.name,
+        },
+      }));
+    }
+    selectModel(model.name);
   };
 
   const selectClaudeModelMapping = (
@@ -1174,6 +1214,7 @@ export function AgentsPage() {
       }
       await reloadStatusesAfterAction();
       setOauthConfigurationDraft(null);
+      onConfigurationApplied?.();
     } catch (requestError) {
       if (!handleOAuthLoginError(requestError, 'apply')) {
         setConfigurationError(String(requestError));
@@ -1191,6 +1232,7 @@ export function AgentsPage() {
     try {
       await invoke<AgentConfigActionResult>('install_pi_provider', { model });
       await reloadStatusesAfterAction();
+      onConfigurationApplied?.();
     } catch (requestError) {
       setConfigurationError(String(requestError));
     } finally {
@@ -1223,6 +1265,7 @@ export function AgentsPage() {
     try {
       await invoke<AgentConfigActionResult>('repair_pi_provider', { model });
       await reloadStatusesAfterAction();
+      onConfigurationApplied?.();
     } catch (requestError) {
       setConfigurationError(String(requestError));
     } finally {
@@ -1442,11 +1485,20 @@ export function AgentsPage() {
   ) : oauthLoginRequiredAction ? t(`agents.oauthLoginRequired.${oauthLoginRequiredAction}Description`) : '';
 
   return (
-    <section className="page management-page agents-page">
+    <section className={`page management-page agents-page${embedded ? ' agents-page-embedded' : ''}`}>
       <header className="management-header">
-        <div>
-          <span>Agent Clients</span>
-          <h1>{t('agents.title')}</h1>
+        <div className={embedded ? 'agent-embedded-header-copy' : undefined}>
+          {embedded ? (
+            <>
+              <h1>{t('agents.embedded.title')}</h1>
+              <p>{t('agents.embedded.subtitle')}</p>
+            </>
+          ) : (
+            <>
+              <span>Agent Clients</span>
+              <h1>{t('agents.title')}</h1>
+            </>
+          )}
         </div>
         <div className="agent-header-actions">
           {detectionError ? (
@@ -1496,6 +1548,82 @@ export function AgentsPage() {
         </aside>
 
         <section className="panel agent-config-panel">
+          {embedded ? (
+            <div className="agent-minimal-config">
+              <div className="agent-minimal-client-summary">
+                <span className="agent-minimal-client-icon"><AgentMark definition={activeDefinition} size={24} /></span>
+                <div>
+                  <strong>{activeDefinition.name}</strong>
+                  <span>{activeStatus?.installed ? t('agents.clientDetected') : t('agents.clientNotDetected')}</span>
+                </div>
+                <span className="agent-minimal-version" title={activeStatus?.version ?? undefined}>
+                  {activeStatus?.version ?? activeStatus?.appVersion ?? activeStatus?.cliVersion ?? t('agents.notFetched')}
+                </span>
+              </div>
+
+              {activeStatus?.error || activeStatus?.warnings.length ? (
+                <div className="agent-minimal-message" aria-live="polite">
+                  {activeStatus.error ? (
+                    <span className="agent-inline-message error" role="alert">{activeStatus.error}</span>
+                  ) : (
+                    <span className="agent-inline-message warning">{activeStatus.warnings.join('；')}</span>
+                  )}
+                </div>
+              ) : null}
+
+              <div className="agent-minimal-field">
+                <label htmlFor="embedded-agent-model">{t('agents.useModel')}</label>
+                <AgentModelPicker
+                  models={isClaudeModelMappingClient ? claudeMappingModels : models}
+                  value={isClaudeModelMappingClient ? claudeModelMappingsDraft.sonnet : selectedModel}
+                  loading={modelLoading}
+                  error={modelError}
+                  disabled={busy || !activeStatus?.installed || !activeStatus.supportedPlatform}
+                  onChange={selectEmbeddedModel}
+                  onRefresh={refreshModels}
+                />
+              </div>
+
+              <div className="agent-minimal-actions">
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={runEmbeddedPrimaryAction}
+                  disabled={busy || (isPiClient ? !canEnable : configurationAction !== 'close' && !canEnable)}
+                >
+                  {busyAction ? <LoaderCircle size={16} className="spin" /> : null}
+                  {isPiClient
+                    ? activeStatus?.pluginInstalled ? t('agents.pi.repair') : t('agents.pi.install')
+                    : configurationAction === 'update'
+                      ? t('agents.modify.update')
+                      : configurationAction === 'close'
+                        ? t('agents.modify.close')
+                        : t('agents.modify.apply')}
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => void launchAgent(defaultLaunchTarget)}
+                  disabled={busy || !canLaunchTarget(defaultLaunchTarget)}
+                  title={defaultLaunchTarget?.detail ?? t('agents.launch.unavailable')}
+                >
+                  {busyAction === 'launch' || busyAction === 'launch-cli'
+                    ? <LoaderCircle size={16} className="spin" />
+                    : <Play size={16} />}
+                  {busyAction === 'launch' || busyAction === 'launch-cli'
+                    ? t('agents.launch.starting')
+                    : t('agents.launch.start', { target: defaultLaunchTarget?.label ?? activeDefinition.name })}
+                </button>
+              </div>
+
+              {configurationError || modelSelectionError || launchError ? (
+                <div className="agent-minimal-message" aria-live="polite">
+                  {configurationError || modelSelectionError || launchError}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+          <>
           <div className="agent-subpage-tabs" role="tablist" aria-label={t('agents.tabs.label')}>
             {availableSubpages.map((subpage) => (
               <button
@@ -1965,6 +2093,8 @@ export function AgentsPage() {
               <CodexSessionsPanel />
             </div>
           ) : null}
+          </>
+          )}
         </section>
       </div>
 

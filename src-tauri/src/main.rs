@@ -20,8 +20,8 @@ mod usage;
 #[cfg(test)]
 use configuration_watcher::nearest_existing_watch_directory;
 use management_api::{
-    management_authorization, management_endpoint, management_http_client, read_management_text,
-    read_management_value,
+    format_management_request_error, management_authorization, management_endpoint,
+    management_http_client, read_management_text, read_management_value,
 };
 use oauth_browser::*;
 #[cfg(test)]
@@ -137,6 +137,10 @@ const DEFAULT_REQUEST_RETRY: u32 = 3;
 const DEFAULT_MAX_RETRY_CREDENTIALS: u32 = 0;
 const DEFAULT_MAX_RETRY_INTERVAL: u32 = 30;
 const DEFAULT_STREAMING_BOOTSTRAP_RETRIES: u32 = 0;
+const DEFAULT_DISABLE_COOLING: bool = false;
+const DEFAULT_LOGS_MAX_TOTAL_SIZE_MB: u32 = 0;
+const DEFAULT_ERROR_LOGS_MAX_FILES: u32 = 10;
+const DEFAULT_REDIS_USAGE_QUEUE_RETENTION_SECONDS: u32 = 60;
 const LEGACY_DEFAULT_MANAGEMENT_SECRET_KEY: &str = "123456";
 const MANAGED_AGENT_PROVIDER_ID: &str = "cpa-gui";
 const ZCODE_CONFIG_FILE: &str = "config.json";
@@ -593,7 +597,14 @@ struct GuiConfigFile {
     api_keys: Vec<GuiApiKeyEntry>,
     api_access_remarks: Vec<GuiApiAccessRemark>,
     management_secret_key: String,
+    debug: bool,
+    commercial_mode: bool,
+    logging_to_file: bool,
+    logs_max_total_size_mb: u32,
+    error_logs_max_files: u32,
     usage_statistics_enabled: bool,
+    redis_usage_queue_retention_seconds: u32,
+    request_log: bool,
     plugins_enabled: bool,
     routing_strategy: String,
     proxy_url: String,
@@ -605,6 +616,7 @@ struct GuiConfigFile {
     prefer_gitcode_downloads: bool,
     routing_session_affinity: bool,
     routing_session_affinity_ttl: String,
+    disable_cooling: bool,
     request_retry: u32,
     max_retry_credentials: u32,
     max_retry_interval: u32,
@@ -879,7 +891,14 @@ impl Default for GuiConfigFile {
             // Populated with an OS-generated secret while loading the GUI
             // configuration. Core hashes the value written into config.yaml.
             management_secret_key: String::new(),
+            debug: false,
+            commercial_mode: false,
+            logging_to_file: false,
+            logs_max_total_size_mb: DEFAULT_LOGS_MAX_TOTAL_SIZE_MB,
+            error_logs_max_files: DEFAULT_ERROR_LOGS_MAX_FILES,
             usage_statistics_enabled: true,
+            redis_usage_queue_retention_seconds: DEFAULT_REDIS_USAGE_QUEUE_RETENTION_SECONDS,
+            request_log: false,
             plugins_enabled: false,
             routing_strategy: "round-robin".to_string(),
             proxy_url: String::new(),
@@ -889,6 +908,7 @@ impl Default for GuiConfigFile {
             prefer_gitcode_downloads: false,
             routing_session_affinity: false,
             routing_session_affinity_ttl: String::new(),
+            disable_cooling: DEFAULT_DISABLE_COOLING,
             request_retry: DEFAULT_REQUEST_RETRY,
             max_retry_credentials: DEFAULT_MAX_RETRY_CREDENTIALS,
             max_retry_interval: DEFAULT_MAX_RETRY_INTERVAL,
@@ -912,7 +932,14 @@ struct GuiConfigPresence {
     default_terminal: Option<String>,
     start_core_on_launch: Option<bool>,
     silent_start: Option<bool>,
+    debug: Option<bool>,
+    commercial_mode: Option<bool>,
+    logging_to_file: Option<bool>,
+    logs_max_total_size_mb: Option<u32>,
+    error_logs_max_files: Option<u32>,
     usage_statistics_enabled: Option<bool>,
+    redis_usage_queue_retention_seconds: Option<u32>,
+    request_log: Option<bool>,
     plugins_enabled: Option<bool>,
     routing_strategy: Option<String>,
     proxy_url: Option<String>,
@@ -922,6 +949,7 @@ struct GuiConfigPresence {
     prefer_gitcode_downloads: Option<bool>,
     routing_session_affinity: Option<bool>,
     routing_session_affinity_ttl: Option<String>,
+    disable_cooling: Option<bool>,
     request_retry: Option<u32>,
     max_retry_credentials: Option<u32>,
     max_retry_interval: Option<u32>,
@@ -1330,6 +1358,8 @@ struct GuiNetworkRoutingSettings {
     proxy_url: String,
     routing_session_affinity: bool,
     routing_session_affinity_ttl: String,
+    #[serde(default)]
+    disable_cooling: bool,
     request_retry: u32,
     max_retry_credentials: u32,
     max_retry_interval: u32,
@@ -1347,6 +1377,8 @@ struct GuiNetworkEndpointSettings {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GuiRetrySettings {
+    #[serde(default)]
+    disable_cooling: bool,
     request_retry: u32,
     max_retry_credentials: u32,
     max_retry_interval: u32,
@@ -1368,6 +1400,18 @@ struct CoreTlsSettings {
     key: String,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CoreLoggingSettingsInput {
+    debug: bool,
+    commercial_mode: bool,
+    logging_to_file: bool,
+    logs_max_total_size_mb: u32,
+    error_logs_max_files: u32,
+    usage_statistics_enabled: bool,
+    redis_usage_queue_retention_seconds: u32,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CoreConfigSettings {
@@ -1379,13 +1423,20 @@ struct CoreConfigSettings {
     auth_dir: String,
     api_keys: Vec<String>,
     management_secret_configured: bool,
-    #[serde(skip_serializing)]
+    debug: bool,
+    commercial_mode: bool,
+    logging_to_file: bool,
+    logs_max_total_size_mb: u32,
+    error_logs_max_files: u32,
     usage_statistics_enabled: bool,
+    redis_usage_queue_retention_seconds: u32,
+    request_log: bool,
     plugins_enabled: bool,
     routing_strategy: String,
     proxy_url: String,
     routing_session_affinity: bool,
     routing_session_affinity_ttl: String,
+    disable_cooling: bool,
     request_retry: u32,
     max_retry_credentials: u32,
     max_retry_interval: u32,
@@ -1411,11 +1462,20 @@ struct CoreConfigView {
     management_secret_configured: bool,
     port: u16,
     allow_lan: bool,
+    debug: bool,
+    commercial_mode: bool,
+    logging_to_file: bool,
+    logs_max_total_size_mb: u32,
+    error_logs_max_files: u32,
+    usage_statistics_enabled: bool,
+    redis_usage_queue_retention_seconds: u32,
+    request_log: bool,
     plugins_enabled: bool,
     routing_strategy: String,
     proxy_url: String,
     routing_session_affinity: bool,
     routing_session_affinity_ttl: String,
+    disable_cooling: bool,
     request_retry: u32,
     max_retry_credentials: u32,
     max_retry_interval: u32,
@@ -1860,6 +1920,7 @@ impl GuiConfigState {
             config.proxy_url = settings.proxy_url.clone();
             config.routing_session_affinity = settings.routing_session_affinity;
             config.routing_session_affinity_ttl = settings.routing_session_affinity_ttl.clone();
+            config.disable_cooling = settings.disable_cooling;
             config.request_retry = settings.request_retry;
             config.max_retry_credentials = settings.max_retry_credentials;
             config.max_retry_interval = settings.max_retry_interval;
@@ -1880,6 +1941,7 @@ impl GuiConfigState {
 
     fn update_retry_settings(&self, settings: &GuiConfigFile) -> Result<GuiConfigFile, String> {
         self.update(|config| {
+            config.disable_cooling = settings.disable_cooling;
             config.request_retry = settings.request_retry;
             config.max_retry_credentials = settings.max_retry_credentials;
             config.max_retry_interval = settings.max_retry_interval;
@@ -2021,7 +2083,15 @@ impl GuiConfigState {
             config.port = settings.port;
             config.allow_lan = !is_loopback_host(&settings.host);
             config.auth_dir = settings.auth_dir.clone();
+            config.debug = settings.debug;
+            config.commercial_mode = settings.commercial_mode;
+            config.logging_to_file = settings.logging_to_file;
+            config.logs_max_total_size_mb = settings.logs_max_total_size_mb;
+            config.error_logs_max_files = settings.error_logs_max_files;
             config.usage_statistics_enabled = settings.usage_statistics_enabled;
+            config.redis_usage_queue_retention_seconds =
+                settings.redis_usage_queue_retention_seconds;
+            config.request_log = settings.request_log;
             if let Some(secret_key) = settings
                 .management_secret_key
                 .as_deref()
@@ -2035,6 +2105,7 @@ impl GuiConfigState {
             config.proxy_url = settings.proxy_url.clone();
             config.routing_session_affinity = settings.routing_session_affinity;
             config.routing_session_affinity_ttl = settings.routing_session_affinity_ttl.clone();
+            config.disable_cooling = settings.disable_cooling;
             config.request_retry = settings.request_retry;
             config.max_retry_credentials = settings.max_retry_credentials;
             config.max_retry_interval = settings.max_retry_interval;
@@ -2080,12 +2151,20 @@ impl From<&GuiConfigFile> for CoreConfigSettings {
             auth_dir: config.auth_dir.clone(),
             api_keys: gui_api_key_values(&config.api_keys),
             management_secret_configured: !config.management_secret_key.is_empty(),
+            debug: config.debug,
+            commercial_mode: config.commercial_mode,
+            logging_to_file: config.logging_to_file,
+            logs_max_total_size_mb: config.logs_max_total_size_mb,
+            error_logs_max_files: config.error_logs_max_files,
             usage_statistics_enabled: config.usage_statistics_enabled,
+            redis_usage_queue_retention_seconds: config.redis_usage_queue_retention_seconds,
+            request_log: config.request_log,
             plugins_enabled: config.plugins_enabled,
             routing_strategy: config.routing_strategy.clone(),
             proxy_url: config.proxy_url.clone(),
             routing_session_affinity: config.routing_session_affinity,
             routing_session_affinity_ttl: config.routing_session_affinity_ttl.clone(),
+            disable_cooling: config.disable_cooling,
             request_retry: config.request_retry,
             max_retry_credentials: config.max_retry_credentials,
             max_retry_interval: config.max_retry_interval,
@@ -2110,11 +2189,20 @@ impl From<&GuiConfigFile> for CoreConfigView {
             management_secret_configured: !config.management_secret_key.is_empty(),
             port: config.port,
             allow_lan: config.allow_lan,
+            debug: config.debug,
+            commercial_mode: config.commercial_mode,
+            logging_to_file: config.logging_to_file,
+            logs_max_total_size_mb: config.logs_max_total_size_mb,
+            error_logs_max_files: config.error_logs_max_files,
+            usage_statistics_enabled: config.usage_statistics_enabled,
+            redis_usage_queue_retention_seconds: config.redis_usage_queue_retention_seconds,
+            request_log: config.request_log,
             plugins_enabled: config.plugins_enabled,
             routing_strategy: config.routing_strategy.clone(),
             proxy_url: config.proxy_url.clone(),
             routing_session_affinity: config.routing_session_affinity,
             routing_session_affinity_ttl: config.routing_session_affinity_ttl.clone(),
+            disable_cooling: config.disable_cooling,
             request_retry: config.request_retry,
             max_retry_credentials: config.max_retry_credentials,
             max_retry_interval: config.max_retry_interval,
@@ -2421,6 +2509,8 @@ fn main() {
             get_core_tls_settings,
             save_core_tls_settings,
             get_core_config_settings,
+            save_core_logging_settings,
+            set_core_request_log,
             add_core_api_key,
             update_core_api_key,
             delete_core_api_key,
@@ -2430,6 +2520,7 @@ fn main() {
             provider_health::provider_health_probe,
             management_api::upload_auth_file,
             management_api::open_auth_files_directory,
+            management_api::open_core_logs_directory,
             set_core_plugins_enabled,
             set_core_routing_strategy,
             set_core_proxy_url,

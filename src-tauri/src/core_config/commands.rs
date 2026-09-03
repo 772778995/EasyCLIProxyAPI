@@ -119,6 +119,7 @@ pub(crate) fn save_network_routing_settings(
     next.proxy_url = proxy_url.clone();
     next.routing_session_affinity = settings.routing_session_affinity;
     next.routing_session_affinity_ttl = routing_session_affinity_ttl.clone();
+    next.disable_cooling = settings.disable_cooling;
     next.request_retry = settings.request_retry;
     next.max_retry_credentials = settings.max_retry_credentials;
     next.max_retry_interval = settings.max_retry_interval;
@@ -187,6 +188,7 @@ pub(crate) fn save_retry_settings(
 ) -> Result<CoreConfigView, String> {
     let previous = gui_config_state.snapshot()?;
     let mut next = previous.clone();
+    next.disable_cooling = settings.disable_cooling;
     next.request_retry = settings.request_retry;
     next.max_retry_credentials = settings.max_retry_credentials;
     next.max_retry_interval = settings.max_retry_interval;
@@ -236,6 +238,36 @@ pub(crate) fn get_core_config_settings(
     if api_keys != settings.api_keys {
         patch_core_api_keys(&api_keys)?;
     }
+    Ok(CoreConfigView::from(&config))
+}
+
+#[tauri::command]
+pub(crate) fn save_core_logging_settings(
+    gui_config_state: tauri::State<'_, GuiConfigState>,
+    settings: CoreLoggingSettingsInput,
+) -> Result<CoreConfigView, String> {
+    if !(1..=3600).contains(&settings.redis_usage_queue_retention_seconds) {
+        return Err("Redis 用量队列保留时间必须在 1 到 3600 秒之间".to_string());
+    }
+
+    let previous = current_core_config_settings(gui_config_state.inner())?;
+    let mut next = previous.clone();
+    next.debug = settings.debug;
+    next.commercial_mode = settings.commercial_mode;
+    next.logging_to_file = settings.logging_to_file;
+    next.logs_max_total_size_mb = settings.logs_max_total_size_mb;
+    next.error_logs_max_files = settings.error_logs_max_files;
+    next.usage_statistics_enabled = settings.usage_statistics_enabled;
+    next.redis_usage_queue_retention_seconds = settings.redis_usage_queue_retention_seconds;
+
+    patch_core_logging_settings(&next)?;
+    let config = match gui_config_state.sync_core_settings(&next) {
+        Ok(config) => config,
+        Err(error) => {
+            let rollback_error = patch_core_logging_settings(&previous).err();
+            return Err(config_update_error_with_rollback(error, rollback_error));
+        }
+    };
     Ok(CoreConfigView::from(&config))
 }
 
@@ -389,6 +421,25 @@ pub(crate) fn set_core_plugins_enabled(
     settings.plugins_enabled = enabled;
     patch_core_plugins_enabled(settings.plugins_enabled)?;
     let config = gui_config_state.sync_core_settings(&settings)?;
+    Ok(CoreConfigView::from(&config))
+}
+
+#[tauri::command]
+pub(crate) fn set_core_request_log(
+    gui_config_state: tauri::State<'_, GuiConfigState>,
+    enabled: bool,
+) -> Result<CoreConfigView, String> {
+    let mut settings = current_core_config_settings(gui_config_state.inner())?;
+    let previous_enabled = settings.request_log;
+    settings.request_log = enabled;
+    patch_core_request_log(settings.request_log)?;
+    let config = match gui_config_state.sync_core_settings(&settings) {
+        Ok(config) => config,
+        Err(error) => {
+            let rollback_error = patch_core_request_log(previous_enabled).err();
+            return Err(config_update_error_with_rollback(error, rollback_error));
+        }
+    };
     Ok(CoreConfigView::from(&config))
 }
 
