@@ -62,7 +62,7 @@ function downloadSourceLabel(source: VersionDownloadSource, t: ReturnType<typeof
 }
 
 export type MessageType = 'info' | 'success' | 'error';
-const APP_RELEASE_URL = 'https://github.com/router-for-me/EasyCLIProxyAPI/releases/latest';
+const APP_RELEASE_URL = 'https://github.com/772778995/EasyCLIProxyAPI/releases/latest';
 export const DEFAULT_VERSION_DOWNLOAD_SOURCE = 'github';
 
 export function displayAppVersion(version: string) {
@@ -83,7 +83,6 @@ export function VersionManagementPage() {
 
   const {
     status: coreStatus,
-    statusError,
     refreshStatus,
   } = useCoreRuntime();
   const {
@@ -193,7 +192,9 @@ export function VersionManagementPage() {
     try {
       const task = await invoke<CoreInstallTask>('get_core_install_task');
       applyInstallTask(task, false, false);
-    } catch {}
+        } catch {
+          // 内核安装任务不可用时静默保持初始状态，不干扰页面加载
+        }
   };
 
   const updateVersionSource = async (source: VersionDownloadSource) => {

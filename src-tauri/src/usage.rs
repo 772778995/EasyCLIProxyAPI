@@ -51,7 +51,7 @@ const TOKENS_PER_PRICE_UNIT: f64 = 1_000_000.0;
 const LONG_CONTEXT_INPUT_TOKEN_THRESHOLD: u64 = 272_000;
 const BUNDLED_MODEL_PRICE_CATALOG: &str = include_str!("../resources/model_prices.json");
 const MODEL_PRICE_SYNC_URL: &str =
-    "https://raw.githubusercontent.com/router-for-me/EasyCLIProxyAPI/main/src-tauri/resources/model_prices.json";
+    "https://raw.githubusercontent.com/772778995/EasyCLIProxyAPI/main/src-tauri/resources/model_prices.json";
 
 pub(crate) struct UsageCollectorState {
     inner: Mutex<UsageCollectorInner>,
