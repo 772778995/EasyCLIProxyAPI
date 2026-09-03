@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-08-30",
+  "updatedAt": "2026-09-03",
   "models": {
     "ali-deepseek-v4-flash": {
       "inputPer1M": 0.10273973,
@@ -17,6 +17,12 @@
       "outputPer1M": 35,
       "cacheReadPer1M": 0.7,
       "cacheCreationPer1M": 8.75
+    },
+    "claude-fable-5-1": {
+      "inputPer1M": 9,
+      "outputPer1M": 45,
+      "cacheReadPer1M": 0.225,
+      "cacheCreationPer1M": 11.25
     },
     "claude-haiku-4-5": {
       "inputPer1M": 0.7,
@@ -198,9 +204,9 @@
       "cacheReadPer1M": 0.2739726
     },
     "glm-5.3-flash": {
-      "inputPer1M": 0.109589041,
-      "outputPer1M": 0.383561643,
-      "cacheReadPer1M": 0.031506849
+      "inputPer1M": 0.05479452,
+      "outputPer1M": 0.19178082,
+      "cacheReadPer1M": 0.015753424
     },
     "gpt-4.1": {
       "inputPer1M": 2,
@@ -216,6 +222,11 @@
       "inputPer1M": 0.1,
       "outputPer1M": 0.4,
       "cacheReadPer1M": 0.025
+    },
+    "gpt-4o-mini": {
+      "inputPer1M": 0.15,
+      "outputPer1M": 0.6,
+      "cacheReadPer1M": 0.075
     },
     "gpt-5": {
       "inputPer1M": 1.25,
@@ -316,10 +327,10 @@
       "cacheCreationPer1M": 0.2125
     },
     "gpt-5.6-sol": {
-      "inputPer1M": 4.25,
-      "outputPer1M": 25.5,
-      "cacheReadPer1M": 0.425,
-      "cacheCreationPer1M": 5.3125
+      "inputPer1M": 1.7,
+      "outputPer1M": 8.5,
+      "cacheReadPer1M": 0.17,
+      "cacheCreationPer1M": 2.125
     },
     "gpt-5.6-terra": {
       "inputPer1M": 1.7,
@@ -370,6 +381,11 @@
       "inputPer1M": 0.0890411,
       "outputPer1M": 0.35616438,
       "cacheReadPer1M": 0.02226027
+    },
+    "hy4": {
+      "inputPer1M": 0.8219178,
+      "outputPer1M": 2.465753424,
+      "cacheReadPer1M": 0.04109589
     },
     "kimi-k2.6": {
       "inputPer1M": 0.57876712,
@@ -476,6 +492,11 @@
       "outputPer1M": 0.08219178,
       "cacheReadPer1M": 0.00410959
     },
+    "qwen3.7-flash-non-thinking": {
+      "inputPer1M": 0.02054795,
+      "outputPer1M": 0.08219178,
+      "cacheReadPer1M": 0.00410959
+    },
     "qwen3.7-max": {
       "inputPer1M": 1.23287671,
       "outputPer1M": 3.69863014,
@@ -502,12 +523,6 @@
       "inputPer1M": 1.23287671,
       "outputPer1M": 3.69863014,
       "cacheReadPer1M": 0.15410959
-    },
-    "T-C-7-c": {
-      "inputPer1M": 3.5,
-      "outputPer1M": 17.5,
-      "cacheReadPer1M": 0.35,
-      "cacheCreationPer1M": 4.375
     },
     "text-embedding-3-large": {
       "inputPer1M": 0.1105,

@@ -35,6 +35,27 @@
       ]
     },
     {
+      "id": "claude-fable-5-1",
+      "vendor": "Anthropic",
+      "description": "",
+      "tags": [],
+      "supportedEndpoints": [
+        "anthropic",
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 9,
+      "outputPer1M": 45,
+      "cacheReadPer1M": 0.225,
+      "cacheCreationPer1M": 11.25,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
       "id": "claude-haiku-4-5",
       "vendor": "Anthropic",
       "description": "Claude Haiku 4.5 是 Anthropic 于 2025 年 10 月发布的 Claude 4.5 系列轻量模型，定位为「具备近前沿智能的最快模型」。针对高吞吐、低延迟场景深度优化，以极低的首字延迟和1/5 每百万 Token 的极致性价比，提供接近旗舰模型的基础推理与编码能力。支持 200K token 上下文、最大输出 64K token，具备扩展思考（Extended Thinking）模式可按需开启深度推理，是大规模分类、路由分发、实时对话与成本敏感型生产部署的理想选择。",
@@ -314,9 +335,9 @@
         "openai-response-compact"
       ],
       "quotaType": 0,
-      "inputPer1M": 0.109589041,
-      "outputPer1M": 0.383561643,
-      "cacheReadPer1M": 0.031506849,
+      "inputPer1M": 0.05479452,
+      "outputPer1M": 0.19178082,
+      "cacheReadPer1M": 0.015753424,
       "cacheCreationPer1M": null,
       "fixedPrice": null,
       "contextWindow": 1048576,
@@ -324,6 +345,90 @@
         "text",
         "image",
         "video"
+      ]
+    },
+    {
+      "id": "gpt-5.4",
+      "vendor": "OpenAI",
+      "description": "GPT-5.4 系 OpenAI 于 2026 年 3 月 5 日发布的面向专业工作的「最强且最高效」前沿模型，同步上线 ChatGPT、API 与 Codex。该模型将推理、编程与 Agent 工作流整合于统一架构，重点强化表格、文档、演示文稿等专业交付能力，并首次在主线推理模型中引入原生 Computer Use。支持 1M token 上下文（实验性），最高 128K 输出，具备图像输入、函数调用、结构化输出、Web 搜索和 MCP 集成。事实性显著增强（单条陈述出错概率较 GPT-5.2 降低 33%），内部投行建模 87.3%、专业工作 GDPval 83.0%。",
+      "tags": [
+        "通用",
+        "编码",
+        "推理",
+        "多模态",
+        "工具调用",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai",
+        "openai-response"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 2.125,
+      "outputPer1M": 12.75,
+      "cacheReadPer1M": 0.2125,
+      "cacheCreationPer1M": 2.65625,
+      "fixedPrice": null,
+      "contextWindow": 1050000,
+      "inputModalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "vendor": "OpenAI",
+      "description": "GPT-5.4 mini 系 OpenAI 于 2026 年 3 月 17 日发布的 GPT-5.4 家族轻量高效变体，官方定位为「迄今在编码、Computer Use 与子代理（subagents）方面最强的 mini 模型」。该模型将 GPT-5.4 的多数核心能力下沉至更快、更省成本、面向高吞吐量负载的形态，支持文本、图像、PDF 多模态输入，上下文窗口达 1.1M token，具备函数调用、并行工具调用、结构化输出、原生 JSON Schema、Web 搜索和 Prompt 缓存等能力。",
+      "tags": [
+        "均衡",
+        "编码",
+        "多模态",
+        "高性价比",
+        "轻量",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai",
+        "openai-response"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.6375,
+      "outputPer1M": 3.825,
+      "cacheReadPer1M": 0.06375,
+      "cacheCreationPer1M": 0.796875,
+      "fixedPrice": null,
+      "contextWindow": 1050000,
+      "inputModalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "id": "gpt-5.5",
+      "vendor": "OpenAI",
+      "description": "GPT-5.5 是 OpenAI 于 2026 年 4 月 24 日发布的新一代旗舰模型，定位为「真正工作所需的新一代智能」。它在编码、网络研究、数据分析、文档与表格创建、软件操作等专业工作场景中实现了重大智能跃升。模型擅长自主规划、使用工具、检查成果并持续执行直至任务完成，在 Agentic Coding、Computer Use、知识工作和早期科学研究领域表现尤为突出。GPT-5.5 在保持与 GPT-5.4 相同的每 Token 延迟的同时实现了更高智能水平，Token 效率也显著提升。支持 1M token 上下文、图像输入、结构化输出、函数调用、Prompt 缓存和 MCP 集成。",
+      "tags": [
+        "旗舰",
+        "深度推理",
+        "编码代理",
+        "多模态",
+        "工具调用",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai",
+        "openai-response"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 4.25,
+      "outputPer1M": 25.5,
+      "cacheReadPer1M": 0.425,
+      "cacheCreationPer1M": 5.3125,
+      "fixedPrice": null,
+      "contextWindow": 1050000,
+      "inputModalities": [
+        "text",
+        "image"
       ]
     },
     {
@@ -371,10 +476,10 @@
         "openai-response"
       ],
       "quotaType": 0,
-      "inputPer1M": 4.25,
-      "outputPer1M": 25.5,
-      "cacheReadPer1M": 0.425,
-      "cacheCreationPer1M": 5.3125,
+      "inputPer1M": 1.7,
+      "outputPer1M": 8.5,
+      "cacheReadPer1M": 0.17,
+      "cacheCreationPer1M": 2.125,
       "fixedPrice": null,
       "contextWindow": 1050000,
       "inputModalities": [
@@ -431,6 +536,25 @@
       "cacheCreationPer1M": null,
       "fixedPrice": null,
       "contextWindow": 256000,
+      "inputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "hy4",
+      "vendor": "Vendor undefined",
+      "description": "",
+      "tags": [],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.8219178,
+      "outputPer1M": 2.465753424,
+      "cacheReadPer1M": 0.04109589,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1048576,
       "inputModalities": [
         "text"
       ]
@@ -627,6 +751,111 @@
       "cacheCreationPer1M": null,
       "fixedPrice": null,
       "contextWindow": 262144,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ]
+    },
+    {
+      "id": "qwen3.7-flash",
+      "vendor": "阿里巴巴",
+      "description": "Qwen3.7-Flash 是阿里云通义千问于 2026 年 7 月发布的轻量高速多模态大模型。采用轻量化 MoE（混合专家）架构，原生支持文本 + 图像 + 视频多模态输入，上下文窗口 1M token、最大输出 65K token。在 Qwen3.6-Flash 基础上全面升级多模态理解、空间智能与 Agent 执行能力，具备 全域思考模式（enable_thinking 可控推理深度）、内置 WebSearch 联网搜索、代码解释器与知识库检索，是高并发、低延迟、成本敏感场景的首选轻量模型。推理速度较前代提升 30% 以上，单位 Token 费用仅为旗舰版的约 1/30。",
+      "tags": [
+        "快速",
+        "多模态",
+        "低成本",
+        "高并发",
+        "Agent",
+        "1M"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.02054795,
+      "outputPer1M": 0.08219178,
+      "cacheReadPer1M": 0.00410959,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ]
+    },
+    {
+      "id": "qwen3.7-flash-non-thinking",
+      "vendor": "阿里巴巴",
+      "description": "",
+      "tags": [],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.02054795,
+      "outputPer1M": 0.08219178,
+      "cacheReadPer1M": 0.00410959,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ]
+    },
+    {
+      "id": "qwen3.7-max",
+      "vendor": "阿里巴巴",
+      "description": "Qwen3.7-Max 是阿里巴巴通义千问团队于 2026 年 7 月发布的 Qwen3.7 系列旗舰模型，也是千问系列迄今最强的大语言模型。在数学推理（AIME、IMO 等竞赛级题目）、编程竞赛和科学推理方面达到了新的高度，支持 1M token 上下文，具备深度推理（Deep Thinking）能力，可对复杂问题进行多步逻辑分析。面向科学研究、复杂编码、竞赛级数学等前沿场景。",
+      "tags": [
+        "旗舰",
+        "深度推理",
+        "编码",
+        "多模态",
+        "工具调用",
+        "128K"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 1.23287671,
+      "outputPer1M": 3.69863014,
+      "cacheReadPer1M": 0.12328767,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
+      "inputModalities": [
+        "text",
+        "image",
+        "video"
+      ]
+    },
+    {
+      "id": "qwen3.7-plus",
+      "vendor": "阿里巴巴",
+      "description": "Qwen3.7-Plus 是阿里巴巴通义千问团队于 2026 年 7 月发布的 Qwen3.7 系列均衡型模型，在编码、推理与指令遵循方面均实现了显著提升。支持 1M token 上下文，具备文本、图像、视频多模态输入能力（Qwen3-VL-Plus 为对应多模态版本）。该模型在数学推理（数学竞赛、科学计算）和代码生成任务上表现突出，面向日常开发、知识工作与中等复杂度 Agent 任务，是 Qwen 系列中的高性能通用主力。",
+      "tags": [
+        "均衡",
+        "编码",
+        "推理",
+        "多模态",
+        "工具调用",
+        "128K"
+      ],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 0.20547945,
+      "outputPer1M": 0.82191781,
+      "cacheReadPer1M": 0.02054795,
+      "cacheCreationPer1M": null,
+      "fixedPrice": null,
+      "contextWindow": 1000000,
       "inputModalities": [
         "text",
         "image",
