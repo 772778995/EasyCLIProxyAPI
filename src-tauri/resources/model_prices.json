@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-09-03",
+  "updatedAt": "2026-09-04",
   "models": {
     "ali-deepseek-v4-flash": {
       "inputPer1M": 0.10273973,
@@ -192,6 +192,11 @@
       "inputPer1M": 1.5,
       "outputPer1M": 7.5,
       "cacheReadPer1M": 0.15
+    },
+    "gemini-3.8-flash": {
+      "inputPer1M": 0.75,
+      "outputPer1M": 3.75,
+      "cacheReadPer1M": 0.075
     },
     "glm-5.2": {
       "inputPer1M": 0.657534,

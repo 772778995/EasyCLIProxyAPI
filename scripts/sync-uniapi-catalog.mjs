@@ -1,10 +1,14 @@
-// 从 UniAPI pricing API 拉取模型数据，生成三份产物：
+// 从 UniAPI pricing API 拉取模型数据，生成四份产物：
 // 1. src-tauri/resources/uniapi_catalog.json —— UniAPI 精选模型目录（含 contextWindow/inputModalities，联网查证值）
 // 2. src-tauri/resources/model_prices.json —— 用量成本估算价格表（上游基线 + UniAPI 覆盖/追加）。
 //    覆盖 live 全部按 token 计价（quota_type 0）的模型：渠道变体（ali-/tx-/zj-/origin-）与
 //    embedding/rerank 同样会产生用量记录，一并收录；quota_type 1 按次计价的模型无法用
 //    token 价格表达，跳过
 // 3. src-tauri/resources/claude_models/model-catalog.json —— Claude agent 上下文窗口/显示名目录（基线 + UniAPI 模型 merge）
+// 4. src-tauri/resources/codex_models/model-catalog.json —— Codex agent 模型目录（基线 + UniAPI 模型 merge）。
+//    已有条目按联网查证值覆盖 context/max_context_window 与 input_modalities；
+//    缺失条目以 deepseek-v4-flash（上游为第三方 chat-completions 模型配置的保守模板）追加。
+//    注意：app 启动时会从 CODEX_MODEL_CATALOG_URL 拉远程目录覆盖本地，该 URL 必须指向本 fork
 // 运行：bun scripts/sync-uniapi-catalog.mjs
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -26,6 +30,13 @@ const claudeCatalogPath = join(
 	"src-tauri",
 	"resources",
 	"claude_models",
+	"model-catalog.json",
+);
+const codexCatalogPath = join(
+	root,
+	"src-tauri",
+	"resources",
+	"codex_models",
 	"model-catalog.json",
 );
 
@@ -406,13 +417,65 @@ const claudeCatalogJson = [
 	"",
 ].join("\n");
 
+// 产物 4：codex_models/model-catalog.json。
+// 以现有目录为基线（编译时 include_str 内置 + app 启动后从本 fork raw 地址拉取），
+// UniAPI 精选模型合入：已有条目覆盖 context/input_modalities，缺失条目按 deepseek 模板追加。
+let codexCatalog;
+try {
+	codexCatalog = JSON.parse(await readFile(codexCatalogPath, "utf8"));
+} catch (error) {
+	throw new Error(`解析 codex_models/model-catalog.json 失败: ${error.message}`);
+}
+const codexTemplate = codexCatalog.models.find(
+	(entry) => entry.slug === "deepseek-v4-flash",
+);
+if (!codexTemplate) {
+	throw new Error("codex 目录缺少 deepseek-v4-flash 模板条目");
+}
+const codexBySlug = new Map(
+	codexCatalog.models.map((entry) => [entry.slug.toLowerCase(), entry]),
+);
+let codexAdded = 0;
+let codexUpdated = 0;
+for (const model of models) {
+	const contextWindow = CONTEXT_WINDOWS[model.id];
+	const modalities = INPUT_MODALITIES[model.id];
+	const existing = codexBySlug.get(model.id.toLowerCase());
+	if (existing) {
+		existing.context_window = contextWindow;
+		existing.max_context_window = contextWindow;
+		existing.input_modalities = modalities;
+		codexUpdated += 1;
+		continue;
+	}
+	const entry = structuredClone(codexTemplate);
+	entry.slug = model.id;
+	entry.display_name = displayNames[model.id];
+	entry.description = `${displayNames[model.id]} served via UniAPI with a ${contextWindow.toLocaleString("en-US")} token context window.`;
+	entry.context_window = contextWindow;
+	entry.max_context_window = contextWindow;
+	entry.input_modalities = modalities;
+	if (entry.model_messages?.instructions_template) {
+		entry.model_messages.instructions_template =
+			entry.model_messages.instructions_template.replace(
+				"powered by a DeepSeek model",
+				"powered by an open model",
+		);
+	}
+	codexCatalog.models.push(entry);
+	codexBySlug.set(model.id.toLowerCase(), entry);
+	codexAdded += 1;
+}
+
 await Promise.all([
 	writeFile(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`),
 	writeFile(pricesPath, `${JSON.stringify(prices, null, 2)}\n`),
 	writeFile(claudeCatalogPath, claudeCatalogJson),
+	writeFile(codexCatalogPath, `${JSON.stringify(codexCatalog, null, 2)}\n`),
 ]);
 console.log(
 	`Wrote ${models.length} UniAPI models (${catalog.pricingVersion}); ` +
 		`model_prices: ${Object.keys(prices.models).length} entries; ` +
-		`claude catalog: ${claudeCatalog.models.length} entries`,
+		`claude catalog: ${claudeCatalog.models.length} entries; ` +
+		`codex catalog: ${codexCatalog.models.length} entries (+${codexAdded} added, ${codexUpdated} updated)`,
 );
