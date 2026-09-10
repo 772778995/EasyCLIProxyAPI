@@ -1,5 +1,142 @@
 use super::*;
 
+pub(crate) static CORE_OPERATION_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) fn lock_core_operation(
+    process_state: &CoreProcessState,
+) -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    let guard = CORE_OPERATION_LOCK
+        .try_lock()
+        .map_err(|_| "内核正在执行其他操作，请稍后重试".to_string())?;
+    process_state.ensure_active()?;
+    Ok(guard)
+}
+
+// Own the guard from spawn, including while the management port is starting.
+pub(crate) struct CoreChild {
+    child: Child,
+    #[cfg(windows)]
+    job: isize,
+}
+
+impl std::ops::Deref for CoreChild {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        &self.child
+    }
+}
+
+impl std::ops::DerefMut for CoreChild {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.child
+    }
+}
+
+impl Drop for CoreChild {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        {
+            close_windows_handle(self.job);
+            let _ = self.child.wait();
+        }
+        #[cfg(not(windows))]
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            let _ = terminate_child(&mut self.child);
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+struct CoreSpawnRequest {
+    command: Command,
+    reply: std::sync::mpsc::SyncSender<io::Result<Child>>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+static CORE_PROCESS_SPAWNER: LazyLock<Result<std::sync::mpsc::Sender<CoreSpawnRequest>, String>> =
+    LazyLock::new(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<CoreSpawnRequest>();
+        thread::Builder::new()
+            .name("cpa-core-spawner".to_string())
+            .spawn(move || {
+                for mut request in receiver {
+                    configure_child_lifetime(&mut request.command);
+                    let result = request.command.spawn();
+                    if let Err(std::sync::mpsc::SendError(Ok(mut child))) =
+                        request.reply.send(result)
+                    {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
+            })
+            .map_err(|error| format!("创建 CPA 内核启动线程失败: {error}"))?;
+        Ok(sender)
+    });
+
+pub(crate) fn spawn_core_child(command: Command) -> Result<CoreChild, String> {
+    #[cfg(target_os = "linux")]
+    let child = spawn_core_child_on_lifetime_thread(command)?;
+
+    #[cfg(not(target_os = "linux"))]
+    let child = {
+        let mut command = command;
+        command
+            .spawn()
+            .map_err(|error| format!("启动 CPA 内核失败: {error}"))?
+    };
+
+    #[cfg(windows)]
+    let job = match attach_child_to_windows_job(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            let mut child = child;
+            return match terminate_child(&mut child) {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(format!(
+                    "{error}；清理未托管的内核进程也失败: {cleanup_error}"
+                )),
+            };
+        }
+    };
+    Ok(CoreChild {
+        child,
+        #[cfg(windows)]
+        job,
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn spawn_core_child_on_lifetime_thread(command: Command) -> Result<Child, String> {
+    let sender = CORE_PROCESS_SPAWNER.as_ref().map_err(Clone::clone)?;
+    let (reply, result) = std::sync::mpsc::sync_channel(1);
+    sender
+        .send(CoreSpawnRequest { command, reply })
+        .map_err(|_| "CPA 内核启动线程已退出".to_string())?;
+    result
+        .recv()
+        .map_err(|_| "CPA 内核启动线程未返回启动结果".to_string())?
+        .map_err(|error| format!("启动 CPA 内核失败: {error}"))
+}
+
+async fn run_core_command(
+    app: tauri::AppHandle,
+    operation: fn(&CoreProcessState, &GuiConfigState) -> Result<CoreStatus, String>,
+) -> Result<CoreStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock_core_operation(app.state::<CoreProcessState>().inner())?;
+        let status = operation(
+            app.state::<CoreProcessState>().inner(),
+            app.state::<GuiConfigState>().inner(),
+        )?;
+        emit_core_status(&app, &status);
+        Ok(status)
+    })
+    .await
+    .map_err(|error| format!("内核后台任务失败: {error}"))?
+}
+
 #[tauri::command]
 pub(crate) async fn check_latest_core(
     app: tauri::AppHandle,
@@ -38,28 +175,33 @@ pub(crate) fn detect_bundled_core() -> Result<Option<BundledCoreInfo>, String> {
 }
 
 #[tauri::command]
-pub(crate) fn install_bundled_core(
+pub(crate) async fn install_bundled_core(
     app: tauri::AppHandle,
     window: tauri::Window,
-    state: tauri::State<'_, CoreDownloadState>,
-    process_state: tauri::State<'_, CoreProcessState>,
-    gui_config_state: tauri::State<'_, GuiConfigState>,
 ) -> Result<CoreInstallResult, String> {
-    let (info, archive_path) = bundled_core_archive()?
-        .ok_or_else(|| "当前发行包没有匹配此系统架构的内置内核".to_string())?;
-    let token = CancellationToken::new();
-    state.start(token, Some(info.version.clone()))?;
-    let result = install_core_with_runtime_restore(
-        &app,
-        process_state.inner(),
-        gui_config_state.inner(),
-        || install_bundled_core_inner(&window, state.inner(), &info, &archive_path),
-    );
-    if result.is_err() {
-        let _ = cleanup_core_work_dirs();
-    }
-    state.finish(&window, result.clone());
-    result
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock_core_operation(app.state::<CoreProcessState>().inner())?;
+        let state = app.state::<CoreDownloadState>();
+        let process_state = app.state::<CoreProcessState>();
+        let gui_config_state = app.state::<GuiConfigState>();
+        let (info, archive_path) = bundled_core_archive()?
+            .ok_or_else(|| "当前发行包没有匹配此系统架构的内置内核".to_string())?;
+        let token = CancellationToken::new();
+        state.start(token, Some(info.version.clone()))?;
+        let result = install_core_with_runtime_restore(
+            &app,
+            process_state.inner(),
+            gui_config_state.inner(),
+            || install_bundled_core_inner(&window, state.inner(), &info, &archive_path),
+        );
+        if result.is_err() {
+            let _ = cleanup_core_work_dirs();
+        }
+        state.finish(&window, result.clone());
+        result
+    })
+    .await
+    .map_err(|error| format!("离线内核安装后台任务失败: {error}"))?
 }
 
 pub(crate) fn core_needs_bundled_bootstrap(install_dir: &Path) -> bool {
@@ -103,47 +245,51 @@ pub(crate) fn get_core_install_task(state: tauri::State<'_, CoreDownloadState>) 
 pub(crate) async fn install_core_version(
     app: tauri::AppHandle,
     window: tauri::Window,
-    state: tauri::State<'_, CoreDownloadState>,
-    process_state: tauri::State<'_, CoreProcessState>,
-    gui_config_state: tauri::State<'_, GuiConfigState>,
     version: Option<String>,
 ) -> Result<CoreInstallResult, String> {
-    let config = gui_config_state.snapshot()?;
-    let proxy_url = config.proxy_url.clone();
-    let token = CancellationToken::new();
-    state.start(token.clone(), version.clone())?;
-    let (was_running, install_result) =
-        match pause_core_for_install(&app, process_state.inner(), &config) {
-            Ok(was_running) => (
-                was_running,
-                install_core_version_inner(
-                    &app,
-                    &window,
-                    state.inner(),
-                    gui_config_state.inner(),
-                    token,
-                    version,
-                    &proxy_url,
-                    config.selected_download_candidate(),
-                    config.custom_download_mirrors.clone(),
-                )
-                .await,
-            ),
-            Err(error) => (false, Err(error)),
-        };
-    let result = restore_core_after_install(
-        &app,
-        process_state.inner(),
-        &config,
-        was_running,
-        install_result,
-    );
-    if result.is_err() {
-        let _ = cleanup_core_work_dirs();
-    }
-    state.finish(&window, result.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock_core_operation(app.state::<CoreProcessState>().inner())?;
+        let state = app.state::<CoreDownloadState>();
+        let process_state = app.state::<CoreProcessState>();
+        let gui_config_state = app.state::<GuiConfigState>();
+        let config = gui_config_state.snapshot()?;
+        let proxy_url = config.proxy_url.clone();
+        let token = CancellationToken::new();
+        state.start(token.clone(), version.clone())?;
+        let (was_running, install_result) =
+            match pause_core_for_install(&app, process_state.inner(), &config) {
+                Ok(was_running) => (
+                    was_running,
+                    tauri::async_runtime::block_on(install_core_version_inner(
+                        &app,
+                        &window,
+                        state.inner(),
+                        gui_config_state.inner(),
+                        token,
+                        version,
+                        &proxy_url,
+                        config.selected_download_candidate(),
+                        config.custom_download_mirrors.clone(),
+                    )),
+                ),
+                Err(error) => (false, Err(error)),
+            };
+        let result = restore_core_after_install(
+            &app,
+            process_state.inner(),
+            &config,
+            was_running,
+            install_result,
+        );
+        if result.is_err() {
+            let _ = cleanup_core_work_dirs();
+        }
+        state.finish(&window, result.clone());
 
-    result
+        result
+    })
+    .await
+    .map_err(|error| format!("内核安装后台任务失败: {error}"))?
 }
 
 fn install_core_with_runtime_restore<F>(
@@ -166,10 +312,21 @@ fn pause_core_for_install(
     process_state: &CoreProcessState,
     config: &GuiConfigFile,
 ) -> Result<bool, String> {
-    let was_running = current_core_status(Some(process_state), Some(config.port))?.running;
+    let was_running = pause_core_process_for_install(process_state)?;
+    if was_running {
+        emit_current_core_status(app, process_state, config.port);
+    }
+    Ok(was_running)
+}
+
+pub(crate) fn pause_core_process_for_install(
+    process_state: &CoreProcessState,
+) -> Result<bool, String> {
+    process_state.ensure_active()?;
+    // A process can hold files even when its HTTP port is not responding.
+    let was_running = current_core_status(Some(process_state), None)?.running;
     if was_running {
         stop_core_process_inner(process_state)?;
-        emit_current_core_status(app, process_state, config.port);
     }
     Ok(was_running)
 }
@@ -181,7 +338,7 @@ fn restore_core_after_install<T>(
     was_running: bool,
     install_result: Result<T, String>,
 ) -> Result<T, String> {
-    let restart_result = if was_running {
+    let restart_result = if was_running && !process_state.is_shutting_down() {
         start_core_process_inner(process_state, config)
     } else {
         Ok(())
@@ -213,14 +370,8 @@ fn emit_current_core_status(app: &tauri::AppHandle, process_state: &CoreProcessS
 }
 
 #[tauri::command]
-pub(crate) fn start_core_process(
-    app: tauri::AppHandle,
-    process_state: tauri::State<'_, CoreProcessState>,
-    gui_config_state: tauri::State<'_, GuiConfigState>,
-) -> Result<CoreStatus, String> {
-    let status = start_core_process_with_state(process_state.inner(), gui_config_state.inner())?;
-    emit_core_status(&app, &status);
-    Ok(status)
+pub(crate) async fn start_core_process(app: tauri::AppHandle) -> Result<CoreStatus, String> {
+    run_core_command(app, start_core_process_with_state).await
 }
 
 pub(crate) fn start_core_process_with_state(
@@ -237,14 +388,8 @@ pub(crate) fn start_core_process_with_state(
 }
 
 #[tauri::command]
-pub(crate) fn stop_core_process(
-    app: tauri::AppHandle,
-    process_state: tauri::State<'_, CoreProcessState>,
-    gui_config_state: tauri::State<'_, GuiConfigState>,
-) -> Result<CoreStatus, String> {
-    let status = stop_core_process_with_state(process_state.inner(), gui_config_state.inner())?;
-    emit_core_status(&app, &status);
-    Ok(status)
+pub(crate) async fn stop_core_process(app: tauri::AppHandle) -> Result<CoreStatus, String> {
+    run_core_command(app, stop_core_process_with_state).await
 }
 
 pub(crate) fn stop_core_process_with_state(
@@ -257,14 +402,8 @@ pub(crate) fn stop_core_process_with_state(
 }
 
 #[tauri::command]
-pub(crate) fn restart_core_process(
-    app: tauri::AppHandle,
-    process_state: tauri::State<'_, CoreProcessState>,
-    gui_config_state: tauri::State<'_, GuiConfigState>,
-) -> Result<CoreStatus, String> {
-    let status = restart_core_process_with_state(process_state.inner(), gui_config_state.inner())?;
-    emit_core_status(&app, &status);
-    Ok(status)
+pub(crate) async fn restart_core_process(app: tauri::AppHandle) -> Result<CoreStatus, String> {
+    run_core_command(app, restart_core_process_with_state).await
 }
 
 pub(crate) fn restart_core_process_with_state(
@@ -272,7 +411,9 @@ pub(crate) fn restart_core_process_with_state(
     gui_config_state: &GuiConfigState,
 ) -> Result<CoreStatus, String> {
     let config = gui_config_state.snapshot()?;
-    let _ = stop_core_process_inner(process_state);
+    if current_core_status(Some(process_state), None)?.running {
+        stop_core_process_inner(process_state)?;
+    }
     start_core_process_inner(process_state, &config)?;
     if let Err(error) = gui_config_state.set_run_on_startup(true) {
         let _ = stop_core_process_inner(process_state);
@@ -995,6 +1136,7 @@ pub(crate) async fn download_asset_inner(
         File::create(archive_path).map_err(|err| format!("创建内核压缩包失败: {err}"))?;
     let mut downloaded = 0_u64;
     let mut hasher = Sha256::new();
+    let mut progress = crate::progress::ProgressThrottle::default();
 
     while let Some(chunk) = tokio::select! {
         chunk = stream.next() => chunk,
@@ -1007,9 +1149,12 @@ pub(crate) async fn download_asset_inner(
             .map_err(|err| format!("保存下载数据失败: {err}"))?;
         hasher.update(&chunk);
         downloaded += chunk.len() as u64;
-        state.progress(window, "下载中", downloaded, total, true);
+        if progress.ready(Instant::now(), total == Some(downloaded)) {
+            state.progress(window, "下载中", downloaded, total, true);
+        }
     }
 
+    state.progress(window, "下载中", downloaded, total, true);
     file.flush()
         .map_err(|err| format!("刷新内核压缩包失败: {err}"))?;
     ensure_not_cancelled(token, Some(archive_path))?;
@@ -1125,10 +1270,155 @@ fn core_management_address(listen_host: &str, port: u16) -> Result<SocketAddr, S
     Ok(SocketAddr::new(ip, port))
 }
 
+pub(crate) enum CoreStartupFailure {
+    ShuttingDown,
+    Exited(std::process::ExitStatus),
+    Spawn(String),
+    StatusCheck(io::Error),
+    TimedOut(u16),
+}
+
+impl CoreStartupFailure {
+    fn child_has_exited(&self) -> bool {
+        matches!(self, Self::Exited(_))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn was_killed_by_sigkill(&self) -> bool {
+        use std::os::unix::process::ExitStatusExt;
+
+        matches!(
+            self,
+            Self::Exited(status)
+                if status.code().is_none() && status.signal() == Some(libc::SIGKILL)
+        )
+    }
+}
+
+impl std::fmt::Display for CoreStartupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ShuttingDown => formatter.write_str("应用正在退出，已取消内核启动"),
+            Self::Exited(status) => write!(formatter, "CPA 内核启动后立即退出: {status}"),
+            Self::Spawn(error) => formatter.write_str(error),
+            Self::StatusCheck(error) => write!(formatter, "检查 CPA 内核启动状态失败: {error}"),
+            Self::TimedOut(port) => {
+                write!(formatter, "CPA 内核启动超时：10 秒内未监听管理端口 {port}")
+            }
+        }
+    }
+}
+
+pub(crate) fn core_start_log_path(install_dir: &Path, auth_dir: &str) -> PathBuf {
+    core_logs_dir_path(auth_dir, install_dir).join("core-start-output.log")
+}
+
+pub(crate) fn core_start_stdio(log_path: &Path) -> io::Result<(Stdio, Stdio)> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Keep only the current process run so console output cannot grow without
+    // bound across restarts. Both child handles use append mode to avoid their
+    // independent file cursors overwriting each other's output.
+    let mut header_file = File::options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(log_path)?;
+    writeln!(header_file, "===== CPA 内核启动 {} =====", unix_now())?;
+    drop(header_file);
+
+    let stdout_file = File::options().append(true).open(log_path)?;
+    let stderr_file = File::options().append(true).create(true).open(log_path)?;
+
+    Ok((Stdio::from(stdout_file), Stdio::from(stderr_file)))
+}
+
+fn core_start_error_with_log(error: &str, log_path: &Path, log_error: Option<&str>) -> String {
+    match log_error {
+        Some(log_error) => format!(
+            "{error}；无法写入启动日志 {}: {log_error}",
+            path_to_string(log_path)
+        ),
+        None => format!("{error}；启动日志: {}", path_to_string(log_path)),
+    }
+}
+
+struct CoreStartAttemptFailure {
+    failure: CoreStartupFailure,
+    log_error: Option<String>,
+}
+
+impl CoreStartAttemptFailure {
+    #[cfg(target_os = "macos")]
+    fn was_killed_by_sigkill(&self) -> bool {
+        self.failure.was_killed_by_sigkill()
+    }
+
+    fn message(&self, log_path: &Path) -> String {
+        self.message_with_detail(log_path, None)
+    }
+
+    fn message_with_detail(&self, log_path: &Path, detail: Option<&str>) -> String {
+        let error = match detail {
+            Some(detail) => format!("{}；{detail}", self.failure),
+            None => self.failure.to_string(),
+        };
+        core_start_error_with_log(&error, log_path, self.log_error.as_deref())
+    }
+}
+
+fn start_core_process_once(
+    process_state: &CoreProcessState,
+    binary_path: &Path,
+    config_path: &str,
+    install_dir: &Path,
+    log_path: &Path,
+    management_address: SocketAddr,
+) -> Result<CoreChild, CoreStartAttemptFailure> {
+    let mut command = Command::new(binary_path);
+    command
+        .args(["-config", config_path])
+        .current_dir(install_dir)
+        .stdin(Stdio::null());
+    let log_error = match core_start_stdio(log_path) {
+        Ok((stdout, stderr)) => {
+            command.stdout(stdout).stderr(stderr);
+            None
+        }
+        Err(error) => {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+            Some(error.to_string())
+        }
+    };
+    configure_background_command(&mut command);
+
+    let mut child = match spawn_core_child(command) {
+        Ok(child) => child,
+        Err(error) => {
+            return Err(CoreStartAttemptFailure {
+                failure: CoreStartupFailure::Spawn(error),
+                log_error,
+            });
+        }
+    };
+    match wait_for_core_management_port(&mut child, management_address, process_state) {
+        Ok(()) => Ok(child),
+        Err(failure) => {
+            if !failure.child_has_exited() {
+                let _ = terminate_child(&mut child);
+            }
+            Err(CoreStartAttemptFailure { failure, log_error })
+        }
+    }
+}
+
 pub(crate) fn start_core_process_inner(
     process_state: &CoreProcessState,
     gui_config: &GuiConfigFile,
 ) -> Result<(), String> {
+    process_state.ensure_active()?;
     let install_dir = core_install_dir()?;
     if !gui_config.auth_dir.trim().is_empty() {
         let auth_dir = auth_dir_path_for_core(&gui_config.auth_dir, &install_dir);
@@ -1155,56 +1445,73 @@ pub(crate) fn start_core_process_inner(
 
     let config_path = merge_core_config_for_start(&install_dir, gui_config)?;
     let config_path = path_to_string(&config_path);
-    let mut command = Command::new(&binary_path);
-    command
-        .args(["-config", &config_path])
-        .current_dir(&install_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    configure_background_command(&mut command);
-    configure_child_lifetime(&mut command);
+    let log_path = core_start_log_path(&install_dir, &gui_config.auth_dir);
+    let start_once = || {
+        start_core_process_once(
+            process_state,
+            &binary_path,
+            &config_path,
+            &install_dir,
+            &log_path,
+            management_address,
+        )
+    };
 
-    let mut child = command
-        .spawn()
-        .map_err(|err| format!("启动 CPA 内核失败: {err}"))?;
-
-    if let Err(error) = wait_for_core_management_port(&mut child, management_address) {
-        let _ = terminate_child(&mut child);
-        return Err(error);
-    }
+    #[cfg(target_os = "macos")]
+    let child = match start_once() {
+        Ok(child) => child,
+        Err(failure) if failure.was_killed_by_sigkill() => {
+            if let Err(heal_error) = rematerialize_core_binary(&binary_path) {
+                return Err(failure.message_with_detail(
+                    &log_path,
+                    Some(&format!("自动修复 CPA 内核文件失败: {heal_error}")),
+                ));
+            }
+            match start_once() {
+                Ok(child) => child,
+                Err(failure) if failure.was_killed_by_sigkill() => {
+                    return Err(failure.message_with_detail(
+                        &log_path,
+                        Some("系统再次终止 CPA 内核，请重新安装内核后重试"),
+                    ));
+                }
+                Err(failure) => return Err(failure.message(&log_path)),
+            }
+        }
+        Err(failure) => return Err(failure.message(&log_path)),
+    };
+    #[cfg(not(target_os = "macos"))]
+    let child = start_once().map_err(|failure| failure.message(&log_path))?;
 
     process_state.store_child(child)?;
-
     Ok(())
 }
 
 pub(crate) fn wait_for_core_management_port(
     child: &mut Child,
     address: SocketAddr,
-) -> Result<(), String> {
+    process_state: &CoreProcessState,
+) -> Result<(), CoreStartupFailure> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|err| format!("检查 CPA 内核启动状态失败: {err}"))?
-        {
-            return Err(format!("CPA 内核启动后立即退出: {status}"));
+        if process_state.is_shutting_down() {
+            return Err(CoreStartupFailure::ShuttingDown);
+        }
+        if let Some(status) = child.try_wait().map_err(CoreStartupFailure::StatusCheck)? {
+            return Err(CoreStartupFailure::Exited(status));
         }
         if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(format!(
-                "CPA 内核启动超时：10 秒内未监听管理端口 {}",
-                address.port()
-            ));
+            return Err(CoreStartupFailure::TimedOut(address.port()));
         }
         thread::sleep(Duration::from_millis(100));
     }
 }
 
-pub(crate) fn configure_child_lifetime(command: &mut Command) {
+#[cfg(any(target_os = "linux", test))]
+fn configure_child_lifetime(command: &mut Command) {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
@@ -1271,7 +1578,6 @@ pub(crate) fn stop_core_process_inner(process_state: &CoreProcessState) -> Resul
         if let Err(error) = terminate_child(&mut child) {
             errors.push(error);
         }
-        process_state.clear_lifetime_guard();
     }
 
     let mut process_ids = process_state
@@ -1884,8 +2190,14 @@ pub(crate) fn shutdown_managed_core(
             .ok()
             .and_then(|install_dir| find_core_binary(&install_dir))
             .is_some_and(|binary_path| is_core_running(&binary_path));
-    let _ = gui_config_state.set_run_on_startup(was_running);
-    let _ = stop_core_process_inner(process_state);
+    if was_running {
+        if let Err(error) = stop_core_process_inner(process_state) {
+            eprintln!("退出时关闭 CPA 内核失败: {error}");
+        }
+    }
+    if let Err(error) = gui_config_state.set_run_on_startup(was_running) {
+        eprintln!("保存退出前的内核状态失败: {error}");
+    }
 }
 
 #[cfg(windows)]
@@ -1944,6 +2256,13 @@ pub(crate) fn close_windows_handle(handle: isize) {
 }
 
 pub(crate) fn terminate_child(child: &mut Child) -> Result<(), String> {
+    if child
+        .try_wait()
+        .map_err(|error| format!("检查 CPA 内核进程状态失败: {error}"))?
+        .is_some()
+    {
+        return Ok(());
+    }
     #[cfg(windows)]
     {
         child
@@ -1982,10 +2301,31 @@ pub(crate) fn terminate_child(child: &mut Child) -> Result<(), String> {
 pub(crate) fn terminate_process_id(process_id: u32) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let process_id = process_id.to_string();
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::{
+            Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT},
+            System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+        };
+
+        // Keep a handle to this process until it is signalled. taskkill exiting
+        // successfully only means termination was requested, not that file
+        // handles have been released.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, process_id) };
+        if handle.is_null() {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+                return Ok(());
+            }
+            return Err(format!("打开 CPA 内核进程失败: PID {process_id}: {error}"));
+        }
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+        let raw_handle = handle.as_raw_handle();
+        if unsafe { WaitForSingleObject(raw_handle, 0) } == WAIT_OBJECT_0 {
+            return Ok(());
+        }
         let mut command = Command::new("taskkill");
         command
-            .args(["/PID", &process_id, "/T", "/F"])
+            .args(["/PID", &process_id.to_string(), "/T", "/F"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -1993,11 +2333,15 @@ pub(crate) fn terminate_process_id(process_id: u32) -> Result<(), String> {
         let status = command
             .status()
             .map_err(|err| format!("关闭 CPA 内核进程失败: {err}"))?;
-
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("关闭 CPA 内核进程失败: PID {process_id}"))
+        let wait =
+            unsafe { WaitForSingleObject(raw_handle, if status.success() { 10_000 } else { 0 }) };
+        match wait {
+            WAIT_OBJECT_0 => Ok(()),
+            WAIT_TIMEOUT => Err(format!("CPA 内核进程未退出: PID {process_id}")),
+            _ => Err(format!(
+                "等待 CPA 内核进程退出失败: PID {process_id}: {}",
+                io::Error::last_os_error()
+            )),
         }
     }
 
@@ -2121,9 +2465,7 @@ fn overlay_directory(source_dir: &Path, target_dir: &Path) -> Result<(), String>
                     path_to_string(&target_path)
                 ));
             }
-            fs::copy(&source_path, &target_path).map_err(|err| {
-                format!("覆盖内核文件失败 {}: {err}", path_to_string(&target_path))
-            })?;
+            copy_core_file_replace(&source_path, &target_path)?;
         } else {
             return Err(format!(
                 "内核暂存目录包含不支持的条目: {}",
@@ -2133,6 +2475,59 @@ fn overlay_directory(source_dir: &Path, target_dir: &Path) -> Result<(), String>
     }
 
     Ok(())
+}
+
+/// Copies through a sibling temporary file and atomically replaces the target.
+///
+/// In particular, do not change this back to copying over an existing file:
+/// macOS caches code-signature validation by vnode, so in-place updates can
+/// leave an otherwise valid executable permanently rejected with SIGKILL.
+pub(crate) fn copy_core_file_replace(source_path: &Path, target_path: &Path) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let parent = target_path.parent().ok_or_else(|| {
+        format!(
+            "覆盖内核文件失败 {}: 无法确定父目录",
+            path_to_string(target_path)
+        )
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("创建内核文件目录失败 {}: {error}", path_to_string(parent)))?;
+    let file_name = target_path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "cpa-core".into());
+    let temporary_path = parent.join(format!(
+        ".{file_name}.replace.{}.{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let replace_result = (|| -> io::Result<()> {
+        fs::copy(source_path, &temporary_path)?;
+        let temporary_file = File::options().write(true).open(&temporary_path)?;
+        temporary_file.sync_all()?;
+        drop(temporary_file);
+        replace_file_atomically(&temporary_path, target_path)
+    })();
+
+    if let Err(error) = replace_result {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(format!(
+            "覆盖内核文件失败 {}: {error}",
+            path_to_string(target_path)
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn rematerialize_core_binary(binary_path: &Path) -> Result<(), String> {
+    // Replacing the path with an identical copy gives it a fresh vnode and
+    // clears the macOS signature-cache state left by older in-place updates.
+    copy_core_file_replace(binary_path, binary_path)
 }
 
 pub(crate) fn extract_tar_gz(archive_path: &Path, install_dir: &Path) -> Result<(), String> {

@@ -34,6 +34,248 @@ fn core_process_discovery_sleep_helper() {
     }
 }
 
+fn core_child_sleep_command() -> Command {
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "tests::core_runtime::core_process_discovery_sleep_helper",
+            "--nocapture",
+        ])
+        .env("EASYCLIPROXYAPI_PROCESS_DISCOVERY_TEST_HELPER", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    configure_background_command(&mut command);
+    command
+}
+
+fn assert_core_child_survives(child: &mut Child) {
+    thread::sleep(Duration::from_millis(200));
+    let status = child.try_wait();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(status.unwrap().is_none(), "core exited with its launcher");
+}
+
+#[test]
+fn core_child_survives_launcher_thread_exit() {
+    let mut child = thread::spawn(|| spawn_core_child(core_child_sleep_command()).unwrap())
+        .join()
+        .unwrap();
+    assert_core_child_survives(&mut child);
+}
+
+#[test]
+fn core_child_survives_blocking_runtime_shutdown() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let mut child = runtime
+        .block_on(runtime.spawn_blocking(|| spawn_core_child(core_child_sleep_command()).unwrap()))
+        .unwrap();
+    drop(runtime);
+    assert_core_child_survives(&mut child);
+}
+
+#[test]
+fn core_child_spawner_remains_available_after_spawn_failure() {
+    let missing_binary = agent_test_home("missing-core-spawner-binary").join(core_binary_name());
+    assert!(spawn_core_child_on_lifetime_thread(Command::new(missing_binary)).is_err());
+    let mut child =
+        thread::spawn(|| spawn_core_child_on_lifetime_thread(core_child_sleep_command()).unwrap())
+            .join()
+            .unwrap();
+    assert_core_child_survives(&mut child);
+}
+
+#[test]
+fn exiting_during_core_startup_cancels_the_port_wait() {
+    let state = std::sync::Arc::new(CoreProcessState::new(true));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let mut child = spawn_core_child(core_child_sleep_command()).unwrap();
+    let child_id = child.id();
+    let exiting_state = state.clone();
+    let exit = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        exiting_state.shutting_down.store(true, Ordering::Release);
+    });
+
+    let started = Instant::now();
+    let result = wait_for_core_management_port(&mut child, address, &state);
+    drop(child);
+    exit.join().unwrap();
+    assert!(matches!(result, Err(CoreStartupFailure::ShuttingDown)));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(!is_process_alive(child_id));
+}
+
+#[test]
+fn exiting_rejects_new_core_operations_and_cleans_up_an_in_flight_child() {
+    let state = CoreProcessState::new(false);
+    let child = spawn_core_child(core_child_sleep_command()).unwrap();
+    let child_id = child.id();
+    state.shutting_down.store(true, Ordering::Release);
+
+    assert!(lock_core_operation(&state)
+        .unwrap_err()
+        .contains("应用正在退出"));
+    assert!(state
+        .store_child(child)
+        .unwrap_err()
+        .contains("应用正在退出"));
+    assert!(!is_process_alive(child_id));
+    assert_eq!(state.managed_pid(), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn core_config_file_lock_helper() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+    let Some(path) = env::var_os("EASYCLIPROXYAPI_CORE_FILE_LOCK_TEST_HELPER") else {
+        return;
+    };
+    let _file = File::options()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(path)
+        .unwrap();
+    println!("CORE_FILE_LOCKED");
+    io::stdout().flush().unwrap();
+    thread::sleep(Duration::from_secs(10));
+}
+
+#[cfg(windows)]
+#[test]
+fn updating_stops_an_adopted_core_without_a_port_before_replacing_its_config() {
+    use std::io::BufRead;
+
+    let root = agent_test_home("core-stop-before-replace");
+    let config_path = root.join(CORE_CONFIG_FILE);
+    let replacement = root.join("new-config.yaml");
+    fs::write(&config_path, b"old config").unwrap();
+    fs::write(&replacement, b"new config").unwrap();
+    let binary_path = env::current_exe().unwrap();
+    let mut command = Command::new(&binary_path);
+    command
+        .args([
+            "--exact",
+            "tests::core_runtime::core_config_file_lock_helper",
+            "--nocapture",
+        ])
+        .env("EASYCLIPROXYAPI_CORE_FILE_LOCK_TEST_HELPER", &config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    configure_background_command(&mut command);
+    // Spawn without the GUI's job guard to simulate a previous orphan.
+    let mut child = command.spawn().unwrap();
+    let output = io::BufReader::new(child.stdout.take().unwrap());
+    let ready = output
+        .lines()
+        .any(|line| line.unwrap() == "CORE_FILE_LOCKED");
+    let state = CoreProcessState::new(false);
+    state
+        .adopt_process_ids(&binary_path, vec![child.id()])
+        .unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let status = current_core_status(Some(&state), Some(port)).unwrap();
+    let locked_result = copy_core_file_replace(&replacement, &config_path);
+    let stopped = pause_core_process_for_install(&state);
+    let exited = child.try_wait().unwrap().is_some();
+    let replace_result = copy_core_file_replace(&replacement, &config_path);
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(ready);
+    assert!(
+        !status.running,
+        "the orphan has no listening management port"
+    );
+    assert!(
+        locked_result.is_err(),
+        "the orphan must hold a real Windows file lock"
+    );
+    assert!(
+        stopped.unwrap(),
+        "the update must stop the orphan despite the closed port"
+    );
+    assert!(
+        exited,
+        "stopping must wait until the process has actually exited"
+    );
+    replace_result.unwrap();
+    assert_eq!(fs::read(&config_path).unwrap(), b"new config");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn core_child_owner_process_helper() {
+    if env::var_os("EASYCLIPROXYAPI_CORE_OWNER_TEST_HELPER").is_none() {
+        return;
+    }
+    let mut command = core_child_sleep_command();
+    command.stdout(Stdio::inherit());
+    let _child = spawn_core_child(command).unwrap();
+    println!("CORE_CHILD_READY");
+    io::stdout().flush().unwrap();
+    thread::sleep(Duration::from_secs(10));
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn core_child_stops_when_owner_process_is_killed() {
+    use std::io::BufRead;
+
+    let mut owner = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tests::core_runtime::core_child_owner_process_helper",
+            "--nocapture",
+        ])
+        .env("EASYCLIPROXYAPI_CORE_OWNER_TEST_HELPER", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut output = io::BufReader::new(owner.stdout.take().unwrap());
+    let mut ready = false;
+    loop {
+        let mut line = String::new();
+        match output.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) if line.trim() == "CORE_CHILD_READY" => {
+                ready = true;
+                break;
+            }
+            Ok(_) => {}
+        }
+    }
+
+    let killed = owner.kill();
+    let waited = owner.wait();
+    let shutdown_started = Instant::now();
+    let mut remaining_output = String::new();
+    let drained = output.read_to_string(&mut remaining_output);
+    assert!(ready, "owner did not finish spawning its core child");
+    killed.unwrap();
+    waited.unwrap();
+    drained.unwrap();
+    assert!(
+        shutdown_started.elapsed() < Duration::from_secs(5),
+        "core kept its output pipe open after the owner was killed"
+    );
+}
+
 #[test]
 fn running_core_process_discovery_ignores_the_same_binary_name_in_another_directory() {
     let root = agent_test_home("running-core-process-scope");
@@ -192,6 +434,9 @@ fn replacing_a_core_preserves_only_regular_bundled_assets() {
 
 #[test]
 fn overlaying_a_core_updates_packaged_files_and_preserves_plugins() {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
     let root = agent_test_home("core-overlay-preserves-plugins");
     let install_dir = root.join("cpa-core");
     let staging_dir = root.join("cpa-core.staging");
@@ -214,6 +459,10 @@ fn overlaying_a_core_updates_packaged_files_and_preserves_plugins() {
     )
     .unwrap();
     fs::write(staging_dir.join("runtime/default.json"), b"new runtime").unwrap();
+    #[cfg(unix)]
+    let original_binary_inode = fs::metadata(install_dir.join(core_binary_name()))
+        .unwrap()
+        .ino();
 
     overlay_install_dir(&install_dir, &staging_dir).unwrap();
 
@@ -240,6 +489,14 @@ fn overlaying_a_core_updates_packaged_files_and_preserves_plugins() {
     assert_eq!(
         fs::read(install_dir.join("user-data.json")).unwrap(),
         b"user data"
+    );
+    #[cfg(unix)]
+    assert_ne!(
+        fs::metadata(install_dir.join(core_binary_name()))
+            .unwrap()
+            .ino(),
+        original_binary_inode,
+        "更新后的内核必须使用新 inode"
     );
     assert!(!staging_dir.exists());
     fs::remove_dir_all(root).unwrap();
@@ -421,4 +678,85 @@ fn release_page_assets_parse_download_links_and_sha256() {
     assert!(assets[1]
         .browser_download_url
         .ends_with("/releases/download/v1.2.3/CLIProxyAPI_1.2.3_linux_amd64.tar.gz"));
+}
+
+#[test]
+fn rematerializing_core_binary_preserves_bytes_and_cleans_up_temporary_file() {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
+    let root = agent_test_home("core-rematerialize");
+    fs::create_dir_all(&root).unwrap();
+    let binary_path = root.join(core_binary_name());
+    fs::write(&binary_path, b"signed core bytes").unwrap();
+    #[cfg(unix)]
+    let original_inode = fs::metadata(&binary_path).unwrap().ino();
+
+    rematerialize_core_binary(&binary_path).unwrap();
+
+    assert_eq!(fs::read(&binary_path).unwrap(), b"signed core bytes");
+    #[cfg(unix)]
+    assert_ne!(fs::metadata(&binary_path).unwrap().ino(), original_inode);
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn core_start_log_path_follows_the_managed_logs_directory() {
+    let base_dir = PathBuf::from("test-base");
+    let install_dir = base_dir.join("cpa-core");
+
+    assert_eq!(
+        core_start_log_path(&install_dir, DEFAULT_AUTH_DIR),
+        base_dir
+            .join("oauth")
+            .join("logs")
+            .join("core-start-output.log")
+    );
+    assert_eq!(
+        core_start_log_path(&install_dir, "custom-auth"),
+        install_dir
+            .join("custom-auth")
+            .join("logs")
+            .join("core-start-output.log")
+    );
+}
+
+#[test]
+fn core_start_output_helper() {
+    if env::var_os("EASYCLIPROXYAPI_CORE_OUTPUT_TEST_HELPER").is_none() {
+        return;
+    }
+    println!("core stdout marker");
+    eprintln!("core stderr marker");
+}
+
+#[test]
+fn core_start_log_captures_stdout_and_stderr() {
+    let root = agent_test_home("core-start-output");
+    let log_path = root.join("logs").join("core-start-output.log");
+    fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+    fs::write(&log_path, "stale startup output").unwrap();
+    let (stdout, stderr) = core_start_stdio(&log_path).unwrap();
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "tests::core_runtime::core_start_output_helper",
+            "--nocapture",
+        ])
+        .env("EASYCLIPROXYAPI_CORE_OUTPUT_TEST_HELPER", "1")
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr);
+    configure_background_command(&mut command);
+
+    assert!(command.status().unwrap().success());
+
+    let output = fs::read_to_string(&log_path).unwrap();
+    assert!(output.contains("===== CPA 内核启动"));
+    assert!(output.contains("core stdout marker"));
+    assert!(output.contains("core stderr marker"));
+    assert!(!output.contains("stale startup output"));
+    fs::remove_dir_all(root).unwrap();
 }

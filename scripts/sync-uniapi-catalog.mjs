@@ -422,19 +422,61 @@ const claudeCatalogJson = [
 ].join("\n");
 
 // 产物 4：codex_models/model-catalog.json。
-// 以现有目录为基线（编译时 include_str 内置 + app 启动后从本 fork raw 地址拉取），
-// UniAPI 精选模型合入：已有条目覆盖 context/input_modalities，缺失条目按 deepseek 模板追加。
+// 以上游基线为底（编译时 include_str 内置 + app 启动后从本 fork raw 地址拉取），
+// UniAPI 精选模型合入：已有条目覆盖 context/input_modalities，缺失条目按内建模板追加。
+// 内建模板取自旧版上游为第三方 chat-completions 模型（deepseek-v4-flash）配置的保守参数：
+// 不启用 OpenAI 专有特性（websockets/unified_exec/web_search/responses_lite）。
+const CODEX_THIRD_PARTY_TEMPLATE = {
+	slug: "",
+	display_name: "",
+	description: "",
+	prefer_websockets: false,
+	support_verbosity: false,
+	default_verbosity: null,
+	apply_patch_tool_type: "freeform",
+	web_search_tool_type: "text",
+	input_modalities: ["text"],
+	supports_image_detail_original: false,
+	truncation_policy: { mode: "tokens", limit: 10000 },
+	supports_parallel_tool_calls: false,
+	experimental_supported_tools: [],
+	tool_mode: null,
+	multi_agent_version: null,
+	use_responses_lite: false,
+	include_skills_usage_instructions: true,
+	auto_review_model_override: null,
+	context_window: 0,
+	max_context_window: 0,
+	auto_compact_token_limit: null,
+	comp_hash: null,
+	reasoning_summary_format: "experimental",
+	default_reasoning_summary: "none",
+	supports_reasoning_summary_parameter: true,
+	supports_reasoning_summaries: true,
+	default_reasoning_level: "high",
+	shell_type: "shell_command",
+	visibility: "list",
+	supported_in_api: true,
+	availability_nux: null,
+	upgrade: null,
+	priority: 50,
+	model_messages: {
+		instructions_template:
+			"You are Codex, a coding agent powered by an open model. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.",
+	},
+	base_instructions:
+		"You are Codex, a coding agent powered by an open model. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.",
+	supported_reasoning_levels: [
+		{ effort: "low", description: "Fast responses with lighter reasoning" },
+		{ effort: "high", description: "Extended reasoning mode" },
+		{ effort: "max", description: "Maximum reasoning for complex agent tasks" },
+	],
+};
 let codexCatalog;
 try {
 	codexCatalog = JSON.parse(await readFile(codexCatalogPath, "utf8"));
 } catch (error) {
 	throw new Error(`解析 codex_models/model-catalog.json 失败: ${error.message}`);
-}
-const codexTemplate = codexCatalog.models.find(
-	(entry) => entry.slug === "deepseek-v4-flash",
-);
-if (!codexTemplate) {
-	throw new Error("codex 目录缺少 deepseek-v4-flash 模板条目");
 }
 const codexBySlug = new Map(
 	codexCatalog.models.map((entry) => [entry.slug.toLowerCase(), entry]),
@@ -449,23 +491,26 @@ for (const model of models) {
 		existing.context_window = contextWindow;
 		existing.max_context_window = contextWindow;
 		existing.input_modalities = modalities;
+		// 上游 v0.2.72+ schema 要求每个模板带非空 base_instructions；
+		// 合入时给缺失该字段的旧条目补齐内建模板值，保证校验通过。
+		if (!existing.base_instructions) {
+			existing.base_instructions = CODEX_THIRD_PARTY_TEMPLATE.base_instructions;
+		}
+		if (!existing.model_messages?.instructions_template) {
+			existing.model_messages = structuredClone(
+				CODEX_THIRD_PARTY_TEMPLATE.model_messages,
+			);
+		}
 		codexUpdated += 1;
 		continue;
 	}
-	const entry = structuredClone(codexTemplate);
+	const entry = structuredClone(CODEX_THIRD_PARTY_TEMPLATE);
 	entry.slug = model.id;
 	entry.display_name = displayNames[model.id];
 	entry.description = `${displayNames[model.id]} served via UniAPI with a ${contextWindow.toLocaleString("en-US")} token context window.`;
 	entry.context_window = contextWindow;
 	entry.max_context_window = contextWindow;
 	entry.input_modalities = modalities;
-	if (entry.model_messages?.instructions_template) {
-		entry.model_messages.instructions_template =
-			entry.model_messages.instructions_template.replace(
-				"powered by a DeepSeek model",
-				"powered by an open model",
-		);
-	}
 	codexCatalog.models.push(entry);
 	codexBySlug.set(model.id.toLowerCase(), entry);
 	codexAdded += 1;
