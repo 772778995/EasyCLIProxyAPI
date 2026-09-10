@@ -475,10 +475,10 @@
         "openai-response"
       ],
       "quotaType": 0,
-      "inputPer1M": 1.7,
-      "outputPer1M": 8.5,
-      "cacheReadPer1M": 0.17,
-      "cacheCreationPer1M": 2.125,
+      "inputPer1M": 3.6,
+      "outputPer1M": 18,
+      "cacheReadPer1M": 0.36,
+      "cacheCreationPer1M": 4.5,
       "fixedPrice": null,
       "contextWindow": 1050000,
       "inputModalities": [
