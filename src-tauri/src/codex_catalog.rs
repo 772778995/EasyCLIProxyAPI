@@ -737,7 +737,7 @@ mod tests {
         let state = catalog_state().unwrap().read().unwrap();
         let sources = &state.sources;
         // 内置 Codex 目录 = 上游基线 10 个 + UniAPI 精选模型（sync-uniapi-catalog.mjs 产物 4 合入）
-        assert_eq!(sources.templates.len(), 39);
+        assert_eq!(sources.templates.len(), 40);
         let fallback_prompt = string_value(&sources.fallback, "base_instructions");
         assert!(fallback_prompt.starts_with(
             "You are a coding agent running in the Codex CLI, a terminal-based coding assistant."

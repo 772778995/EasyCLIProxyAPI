@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-09-04",
+  "updatedAt": "2026-09-10",
   "models": {
     "ali-deepseek-v4-flash": {
       "inputPer1M": 0.10273973,
@@ -342,6 +342,12 @@
       "outputPer1M": 10.2,
       "cacheReadPer1M": 0.17,
       "cacheCreationPer1M": 2.125
+    },
+    "gpt-6-astra": {
+      "inputPer1M": 10,
+      "outputPer1M": 50,
+      "cacheReadPer1M": 1,
+      "cacheCreationPer1M": 12.5
     },
     "gpt-image-2": {
       "inputPer1M": 4.25,

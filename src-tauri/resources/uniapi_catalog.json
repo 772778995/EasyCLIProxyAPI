@@ -152,7 +152,6 @@
         "1M"
       ],
       "supportedEndpoints": [
-        "gemini",
         "openai"
       ],
       "quotaType": 0,
@@ -507,6 +506,26 @@
       "outputPer1M": 10.2,
       "cacheReadPer1M": 0.17,
       "cacheCreationPer1M": 2.125,
+      "fixedPrice": null,
+      "contextWindow": 1050000,
+      "inputModalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "id": "gpt-6-astra",
+      "vendor": "OpenAI",
+      "description": "",
+      "tags": [],
+      "supportedEndpoints": [
+        "openai"
+      ],
+      "quotaType": 0,
+      "inputPer1M": 10,
+      "outputPer1M": 50,
+      "cacheReadPer1M": 1,
+      "cacheCreationPer1M": 12.5,
       "fixedPrice": null,
       "contextWindow": 1050000,
       "inputModalities": [
