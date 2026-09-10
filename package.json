@@ -8,7 +8,11 @@
     "build": "tsc && vite build",
     "check": "tsc --noEmit",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "uniapi": "bun scripts/sync-uniapi-catalog.mjs && bun scripts/check-uniapi-credentials.mjs && bun scripts/sync-uniapi-providers.mjs",
+    "uniapi:catalog": "bun scripts/sync-uniapi-catalog.mjs",
+    "uniapi:credentials": "bun scripts/check-uniapi-credentials.mjs",
+    "uniapi:providers": "bun scripts/sync-uniapi-providers.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
